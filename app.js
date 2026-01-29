@@ -68,7 +68,7 @@
     const exerciseBtns = document.querySelectorAll('.exercise-btn');
     const timerBtns = document.querySelectorAll('.timer-btn');
     const hapticBtn = document.getElementById('haptic-btn');
-    const soundBtn = document.getElementById('voice-btn');
+    const soundBtn = document.getElementById('sound-btn');
 
     // Initialize audio context (must be called from user gesture)
     function initAudio() {

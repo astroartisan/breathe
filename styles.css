@@ -248,30 +248,44 @@ html, body {
     font-variant-numeric: tabular-nums;
 }
 
+/* Footer */
+.footer {
+    padding: 16px 24px 24px;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+}
+
 /* Settings Row */
 .settings-row {
     display: flex;
-    gap: 8px;
-    margin-top: 16px;
+    gap: 12px;
+    justify-content: center;
 }
 
 .setting-btn {
-    width: 36px;
-    height: 36px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    border-radius: 8px;
-    cursor: pointer;
     display: flex;
     align-items: center;
-    justify-content: center;
-    transition: all 0.15s var(--transition-ease);
+    gap: 8px;
+    padding: 10px 16px;
+    border: 1.5px solid var(--border);
+    background: var(--bg);
+    border-radius: 20px;
+    cursor: pointer;
+    transition: all 0.2s var(--transition-ease);
     color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    -webkit-tap-highlight-color: transparent;
 }
 
 .setting-btn:hover {
     border-color: var(--text-secondary);
     color: var(--text);
+}
+
+.setting-btn:active {
+    transform: scale(0.97);
 }
 
 .setting-btn.active {
@@ -281,8 +295,13 @@ html, body {
 }
 
 .setting-btn svg {
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+}
+
+.setting-label {
+    white-space: nowrap;
 }
 
 /* Responsive adjustments */
@@ -330,5 +349,14 @@ html, body {
     .start-btn:hover:not(:disabled) {
         background: #e0e0e0;
         border-color: #e0e0e0;
+    }
+
+    .setting-btn.active {
+        background: var(--text);
+        color: var(--bg);
+    }
+
+    .footer {
+        border-top-color: var(--border);
     }
 }
