@@ -24,13 +24,6 @@
     const SCALE_MIN = 1;
     const SCALE_MAX = 2.5;
 
-    // Haptic patterns (in ms)
-    const HAPTIC_PATTERNS = {
-        'Breathe in': [100],
-        'Hold': [50, 50, 50],
-        'Breathe out': [200]
-    };
-
     // Soft tone frequencies (Hz) - calming musical notes
     const TONE_FREQUENCIES = {
         'Breathe in': 523.25,   // C5 - bright, uplifting
@@ -40,6 +33,7 @@
 
     // Audio context (created on first user interaction)
     let audioContext = null;
+    let audioUnlocked = false;
 
     // State
     let currentExercise = 'relaxing';
@@ -52,7 +46,6 @@
     let sessionStartTime = null;
     let pausedTimeRemaining = null;
     let lastPhaseName = null;
-    let hapticEnabled = false;
     let soundEnabled = false;
 
     // DOM elements
@@ -66,8 +59,7 @@
     const cycleCountEl = document.querySelector('.cycle-count');
     const timeRemainingEl = document.querySelector('.time-remaining');
     const exerciseBtns = document.querySelectorAll('.exercise-btn');
-    const timerBtns = document.querySelectorAll('.timer-btn');
-    const hapticBtn = document.getElementById('haptic-btn');
+    const timerBtns = document.querySelectorAll('.timer-btn:not(.sound-btn)');
     const soundBtn = document.getElementById('sound-btn');
 
     // Initialize audio context (must be called from user gesture)
@@ -75,14 +67,35 @@
         if (!audioContext) {
             audioContext = new (window.AudioContext || window.webkitAudioContext)();
         }
+
+        // iOS requires both resume AND playing a sound in the same user gesture
         if (audioContext.state === 'suspended') {
             audioContext.resume();
+        }
+
+        // Unlock audio on iOS by playing a silent buffer
+        if (!audioUnlocked && audioContext) {
+            try {
+                const buffer = audioContext.createBuffer(1, 1, 22050);
+                const source = audioContext.createBufferSource();
+                source.buffer = buffer;
+                source.connect(audioContext.destination);
+                source.start(0);
+                audioUnlocked = true;
+            } catch (e) {
+                // Ignore errors
+            }
         }
     }
 
     // Play a soft tone
     function playTone(frequency) {
         if (!soundEnabled || !audioContext) return;
+
+        // Ensure audio context is running
+        if (audioContext.state === 'suspended') {
+            audioContext.resume();
+        }
 
         try {
             const oscillator = audioContext.createOscillator();
@@ -100,7 +113,7 @@
             const attackTime = 0.1;
             const sustainTime = 0.3;
             const releaseTime = 0.4;
-            const maxVolume = 0.15; // Keep it soft
+            const maxVolume = 0.2; // Slightly louder for iOS
 
             gainNode.gain.setValueAtTime(0, now);
             gainNode.gain.linearRampToValueAtTime(maxVolume, now + attackTime);
@@ -129,7 +142,7 @@
         loadState();
         setupEventListeners();
         updateUI();
-        updateSettingButtons();
+        updateSoundButton();
     }
 
     // Load saved state from localStorage
@@ -147,11 +160,6 @@
                 updateTimerButtons();
             }
 
-            const savedHaptic = localStorage.getItem('breathe-haptic');
-            if (savedHaptic !== null) {
-                hapticEnabled = savedHaptic === 'true';
-            }
-
             const savedSound = localStorage.getItem('breathe-sound');
             if (savedSound !== null) {
                 soundEnabled = savedSound === 'true';
@@ -166,7 +174,6 @@
         try {
             localStorage.setItem('breathe-exercise', currentExercise);
             localStorage.setItem('breathe-duration', sessionDuration.toString());
-            localStorage.setItem('breathe-haptic', hapticEnabled.toString());
             localStorage.setItem('breathe-sound', soundEnabled.toString());
         } catch (e) {
             // localStorage not available
@@ -204,23 +211,18 @@
             });
         });
 
-        // Setting buttons
-        hapticBtn.addEventListener('click', () => {
-            hapticEnabled = !hapticEnabled;
-            updateSettingButtons();
-            saveState();
-            if (hapticEnabled) {
-                triggerHaptic([50]);
-            }
-        });
-
-        soundBtn.addEventListener('click', () => {
+        // Sound button
+        soundBtn.addEventListener('click', (e) => {
+            e.stopPropagation(); // Prevent timer button behavior
             initAudio();
             soundEnabled = !soundEnabled;
-            updateSettingButtons();
+            updateSoundButton();
             saveState();
             if (soundEnabled) {
-                playTone(440); // A4 test tone
+                // Small delay to ensure iOS audio is fully unlocked
+                setTimeout(() => {
+                    playTone(440); // A4 test tone
+                }, 50);
             }
         });
 
@@ -233,34 +235,15 @@
         });
     }
 
-    // Update setting button states
-    function updateSettingButtons() {
-        hapticBtn.classList.toggle('active', hapticEnabled);
+    // Update sound button state
+    function updateSoundButton() {
         soundBtn.classList.toggle('active', soundEnabled);
     }
 
-    // Trigger haptic feedback
-    function triggerHaptic(pattern) {
-        if (!hapticEnabled) return;
-        if ('vibrate' in navigator) {
-            try {
-                navigator.vibrate(pattern);
-            } catch (e) {
-                // Vibration not supported
-            }
-        }
-    }
-
-    // Handle phase change - trigger haptic and sound
+    // Handle phase change - play tone
     function onPhaseChange(phaseName) {
         if (phaseName === lastPhaseName) return;
         lastPhaseName = phaseName;
-
-        // Trigger haptic
-        const pattern = HAPTIC_PATTERNS[phaseName];
-        if (pattern) {
-            triggerHaptic(pattern);
-        }
 
         // Play tone
         const frequency = TONE_FREQUENCIES[phaseName];
@@ -386,7 +369,6 @@
 
         // Completion feedback
         playCompletionChime();
-        triggerHaptic([100, 100, 100, 100, 200]);
     }
 
     // Main animation loop using requestAnimationFrame
