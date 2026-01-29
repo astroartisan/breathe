@@ -1,0 +1,297 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+:root {
+    --bg: #FFFFFF;
+    --bg-secondary: #F7F6F3;
+    --text: #191919;
+    --text-secondary: #6B6B6B;
+    --border: #E8E7E4;
+    --circle-color: #191919;
+    --circle-size: 80px;
+    --transition-ease: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+html, body {
+    height: 100%;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+.app {
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+.header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 24px 24px 0;
+    color: var(--text);
+}
+
+.logo {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.title {
+    font-size: 18px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+}
+
+.main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 24px 32px;
+}
+
+.exercise-selector {
+    display: flex;
+    gap: 8px;
+    padding: 4px;
+    background: var(--bg-secondary);
+    border-radius: 10px;
+    margin-bottom: 16px;
+}
+
+.exercise-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 12px 20px;
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s var(--transition-ease);
+    min-width: 130px;
+}
+
+.exercise-btn:hover {
+    background: rgba(255, 255, 255, 0.5);
+}
+
+.exercise-btn.active {
+    background: var(--bg);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.exercise-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text);
+}
+
+.exercise-timing {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+/* Timer Selector */
+.timer-selector {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 32px;
+}
+
+.timer-btn {
+    width: 40px;
+    height: 32px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.15s var(--transition-ease);
+    font-family: inherit;
+}
+
+.timer-btn:hover {
+    border-color: var(--text-secondary);
+    color: var(--text);
+}
+
+.timer-btn.active {
+    background: var(--text);
+    border-color: var(--text);
+    color: var(--bg);
+}
+
+.breathing-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    max-width: 320px;
+}
+
+.circle-wrapper {
+    position: relative;
+    width: 240px;
+    height: 240px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 32px;
+}
+
+/* GPU-accelerated circle animation using transform */
+.breathing-circle {
+    width: var(--circle-size);
+    height: var(--circle-size);
+    background: var(--circle-color);
+    border-radius: 50%;
+    transform: scale(1);
+    transform-origin: center center;
+    will-change: transform;
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
+    perspective: 1000px;
+}
+
+.instruction {
+    font-size: 24px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    color: var(--text);
+    margin-bottom: 8px;
+    min-height: 32px;
+}
+
+.phase-timer {
+    font-size: 14px;
+    color: var(--text-secondary);
+    min-height: 20px;
+    font-variant-numeric: tabular-nums;
+}
+
+.controls {
+    display: flex;
+    gap: 12px;
+    margin-top: 32px;
+}
+
+.control-btn {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    border: 1.5px solid var(--border);
+    background: var(--bg);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s var(--transition-ease);
+    color: var(--text);
+}
+
+.control-btn:hover:not(:disabled) {
+    background: var(--bg-secondary);
+    border-color: var(--text-secondary);
+}
+
+.control-btn:active:not(:disabled) {
+    transform: scale(0.95);
+}
+
+.control-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.start-btn {
+    width: 64px;
+    height: 64px;
+    background: var(--text);
+    border-color: var(--text);
+    color: var(--bg);
+}
+
+.start-btn:hover:not(:disabled) {
+    background: #333;
+    border-color: #333;
+}
+
+.hidden {
+    display: none;
+}
+
+.session-info {
+    display: flex;
+    gap: 16px;
+    margin-top: 24px;
+}
+
+.cycle-count,
+.time-remaining {
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Responsive adjustments */
+@media (max-width: 380px) {
+    .exercise-btn {
+        min-width: 110px;
+        padding: 10px 14px;
+    }
+
+    .exercise-timing {
+        font-size: 10px;
+    }
+
+    .timer-btn {
+        width: 36px;
+        font-size: 11px;
+    }
+}
+
+@media (min-height: 700px) {
+    .breathing-container {
+        margin-top: 16px;
+    }
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #191919;
+        --bg-secondary: #252525;
+        --text: #FFFFFF;
+        --text-secondary: #9B9B9B;
+        --border: #333333;
+        --circle-color: #FFFFFF;
+    }
+
+    .exercise-btn:hover {
+        background: rgba(0, 0, 0, 0.3);
+    }
+
+    .timer-btn:hover {
+        border-color: var(--text-secondary);
+    }
+
+    .start-btn:hover:not(:disabled) {
+        background: #e0e0e0;
+        border-color: #e0e0e0;
+    }
+}
