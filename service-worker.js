@@ -1,15 +1,15 @@
-const CACHE_NAME = 'breathe-v2';
+const CACHE_NAME = 'breathe-v4';
 const ASSETS = [
-    '/',
-    '/index.html',
-    '/styles.css',
-    '/app.js',
-    '/manifest.json',
-    '/icons/icon-32.png',
-    '/icons/icon-64.png',
-    '/icons/icon-128.png',
-    '/icons/icon-192.png',
-    '/icons/icon-512.png'
+    './',
+    './index.html',
+    './styles.css',
+    './app.js',
+    './manifest.json',
+    './icons/icon-32.png',
+    './icons/icon-64.png',
+    './icons/icon-128.png',
+    './icons/icon-192.png',
+    './icons/icon-512.png'
 ];
 
 // Install event - cache assets
@@ -41,7 +41,7 @@ self.addEventListener('fetch', event => {
             .catch(() => {
                 // Return offline fallback for navigation requests
                 if (event.request.mode === 'navigate') {
-                    return caches.match('/index.html');
+                    return caches.match('./index.html');
                 }
             })
     );

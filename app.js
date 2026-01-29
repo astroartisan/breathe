@@ -20,13 +20,30 @@
         }
     };
 
-    // Scale factors for GPU-accelerated transform (much smoother than width/height)
+    // Scale factors for GPU-accelerated transform
     const SCALE_MIN = 1;
     const SCALE_MAX = 2.5;
 
+    // Haptic patterns (in ms)
+    const HAPTIC_PATTERNS = {
+        'Breathe in': [100],
+        'Hold': [50, 50, 50],
+        'Breathe out': [200]
+    };
+
+    // Soft tone frequencies (Hz) - calming musical notes
+    const TONE_FREQUENCIES = {
+        'Breathe in': 523.25,   // C5 - bright, uplifting
+        'Hold': 392.00,         // G4 - stable, centered
+        'Breathe out': 329.63   // E4 - warm, releasing
+    };
+
+    // Audio context (created on first user interaction)
+    let audioContext = null;
+
     // State
     let currentExercise = 'relaxing';
-    let sessionDuration = 180; // 3 minutes default
+    let sessionDuration = 180;
     let isRunning = false;
     let currentPhaseIndex = 0;
     let cycleCount = 0;
@@ -34,6 +51,9 @@
     let phaseStartTime = null;
     let sessionStartTime = null;
     let pausedTimeRemaining = null;
+    let lastPhaseName = null;
+    let hapticEnabled = false;
+    let soundEnabled = false;
 
     // DOM elements
     const circle = document.querySelector('.breathing-circle');
@@ -47,12 +67,69 @@
     const timeRemainingEl = document.querySelector('.time-remaining');
     const exerciseBtns = document.querySelectorAll('.exercise-btn');
     const timerBtns = document.querySelectorAll('.timer-btn');
+    const hapticBtn = document.getElementById('haptic-btn');
+    const soundBtn = document.getElementById('voice-btn');
+
+    // Initialize audio context (must be called from user gesture)
+    function initAudio() {
+        if (!audioContext) {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audioContext.state === 'suspended') {
+            audioContext.resume();
+        }
+    }
+
+    // Play a soft tone
+    function playTone(frequency) {
+        if (!soundEnabled || !audioContext) return;
+
+        try {
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+
+            // Soft sine wave
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
+
+            // Gentle envelope - soft attack, sustain, soft release
+            const now = audioContext.currentTime;
+            const attackTime = 0.1;
+            const sustainTime = 0.3;
+            const releaseTime = 0.4;
+            const maxVolume = 0.15; // Keep it soft
+
+            gainNode.gain.setValueAtTime(0, now);
+            gainNode.gain.linearRampToValueAtTime(maxVolume, now + attackTime);
+            gainNode.gain.setValueAtTime(maxVolume, now + attackTime + sustainTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, now + attackTime + sustainTime + releaseTime);
+
+            oscillator.start(now);
+            oscillator.stop(now + attackTime + sustainTime + releaseTime + 0.1);
+        } catch (e) {
+            // Audio not supported
+        }
+    }
+
+    // Play completion chime (gentle arpeggio)
+    function playCompletionChime() {
+        if (!soundEnabled || !audioContext) return;
+
+        const notes = [523.25, 659.25, 783.99]; // C5, E5, G5 - major chord
+        notes.forEach((freq, i) => {
+            setTimeout(() => playTone(freq), i * 150);
+        });
+    }
 
     // Initialize
     function init() {
         loadState();
         setupEventListeners();
         updateUI();
+        updateSettingButtons();
     }
 
     // Load saved state from localStorage
@@ -69,6 +146,16 @@
                 sessionDuration = parseInt(savedDuration, 10);
                 updateTimerButtons();
             }
+
+            const savedHaptic = localStorage.getItem('breathe-haptic');
+            if (savedHaptic !== null) {
+                hapticEnabled = savedHaptic === 'true';
+            }
+
+            const savedSound = localStorage.getItem('breathe-sound');
+            if (savedSound !== null) {
+                soundEnabled = savedSound === 'true';
+            }
         } catch (e) {
             // localStorage not available
         }
@@ -79,6 +166,8 @@
         try {
             localStorage.setItem('breathe-exercise', currentExercise);
             localStorage.setItem('breathe-duration', sessionDuration.toString());
+            localStorage.setItem('breathe-haptic', hapticEnabled.toString());
+            localStorage.setItem('breathe-sound', soundEnabled.toString());
         } catch (e) {
             // localStorage not available
         }
@@ -86,7 +175,10 @@
 
     // Setup event listeners
     function setupEventListeners() {
-        startBtn.addEventListener('click', toggleSession);
+        startBtn.addEventListener('click', () => {
+            initAudio();
+            toggleSession();
+        });
         resetBtn.addEventListener('click', resetSession);
 
         exerciseBtns.forEach(btn => {
@@ -112,12 +204,69 @@
             });
         });
 
+        // Setting buttons
+        hapticBtn.addEventListener('click', () => {
+            hapticEnabled = !hapticEnabled;
+            updateSettingButtons();
+            saveState();
+            if (hapticEnabled) {
+                triggerHaptic([50]);
+            }
+        });
+
+        soundBtn.addEventListener('click', () => {
+            initAudio();
+            soundEnabled = !soundEnabled;
+            updateSettingButtons();
+            saveState();
+            if (soundEnabled) {
+                playTone(440); // A4 test tone
+            }
+        });
+
         // Allow tapping the circle to start
         document.querySelector('.breathing-container').addEventListener('click', (e) => {
             if (!e.target.closest('.controls')) {
+                initAudio();
                 toggleSession();
             }
         });
+    }
+
+    // Update setting button states
+    function updateSettingButtons() {
+        hapticBtn.classList.toggle('active', hapticEnabled);
+        soundBtn.classList.toggle('active', soundEnabled);
+    }
+
+    // Trigger haptic feedback
+    function triggerHaptic(pattern) {
+        if (!hapticEnabled) return;
+        if ('vibrate' in navigator) {
+            try {
+                navigator.vibrate(pattern);
+            } catch (e) {
+                // Vibration not supported
+            }
+        }
+    }
+
+    // Handle phase change - trigger haptic and sound
+    function onPhaseChange(phaseName) {
+        if (phaseName === lastPhaseName) return;
+        lastPhaseName = phaseName;
+
+        // Trigger haptic
+        const pattern = HAPTIC_PATTERNS[phaseName];
+        if (pattern) {
+            triggerHaptic(pattern);
+        }
+
+        // Play tone
+        const frequency = TONE_FREQUENCIES[phaseName];
+        if (frequency) {
+            playTone(frequency);
+        }
     }
 
     // Update exercise button states
@@ -149,6 +298,7 @@
         resetBtn.disabled = false;
         playIcon.classList.add('hidden');
         pauseIcon.classList.remove('hidden');
+        lastPhaseName = null;
 
         // Disable selection while running
         exerciseBtns.forEach(btn => btn.style.pointerEvents = 'none');
@@ -197,6 +347,7 @@
         phaseStartTime = null;
         sessionStartTime = null;
         pausedTimeRemaining = null;
+        lastPhaseName = null;
 
         if (animationFrameId) {
             cancelAnimationFrame(animationFrameId);
@@ -232,6 +383,10 @@
         instruction.textContent = 'Complete';
         phaseTimer.textContent = '';
         timeRemainingEl.textContent = '0:00';
+
+        // Completion feedback
+        playCompletionChime();
+        triggerHaptic([100, 100, 100, 100, 200]);
     }
 
     // Main animation loop using requestAnimationFrame
@@ -251,6 +406,9 @@
         instruction.textContent = phase.name;
         const remaining = Math.ceil((phase.duration - elapsed) / 1000);
         phaseTimer.textContent = remaining > 0 ? `${remaining}s` : '';
+
+        // Trigger phase change feedback
+        onPhaseChange(phase.name);
 
         // Update session time remaining
         updateTimeRemaining(now);
@@ -276,6 +434,7 @@
             }
 
             phaseStartTime = now;
+            lastPhaseName = null; // Reset to trigger next phase feedback
         }
 
         animationFrameId = requestAnimationFrame(runAnimation);
@@ -283,7 +442,6 @@
 
     // Update circle scale using GPU-accelerated transform
     function updateCircleScale(phase, progress) {
-        // Use smooth easing
         const easedProgress = easeInOutSine(progress);
         let scale;
 
@@ -292,11 +450,9 @@
         } else if (phase.scale === 'shrink') {
             scale = SCALE_MAX - (SCALE_MAX - SCALE_MIN) * easedProgress;
         } else {
-            // Hold at max
             scale = SCALE_MAX;
         }
 
-        // GPU-accelerated transform - much smoother than width/height
         circle.style.transform = `scale(${scale})`;
     }
 
@@ -348,7 +504,7 @@
     // Register service worker
     if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
-            navigator.serviceWorker.register('service-worker.js')
+            navigator.serviceWorker.register('./service-worker.js')
                 .then(reg => console.log('SW registered'))
                 .catch(err => console.log('SW registration failed:', err));
         });
