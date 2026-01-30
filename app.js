@@ -35,11 +35,13 @@
     let audioContext = null;
     let audioUnlocked = false;
     let currentTone = null;
-    let silentBufferSource = null; // Keep alive buffer for iOS
+    let silentBufferSource = null;
+    let activePhaseName = null; // Track which phase sound is currently playing for
 
     // Wake Lock for preventing screen sleep
     let wakeLock = null;
-    let noSleepVideo = null; // Fallback for older iOS
+    let noSleepVideo = null;
+    let wakeLockInterval = null; // Keep-alive interval
 
     // State
     let currentExercise = 'relaxing';
@@ -87,11 +89,11 @@
             silentBufferSource.buffer = buffer;
             silentBufferSource.loop = true;
             const gain = audioContext.createGain();
-            gain.gain.value = 0; // Silent
+            gain.gain.value = 0;
             silentBufferSource.connect(gain);
             gain.connect(audioContext.destination);
             silentBufferSource.start();
-            console.log('Silent buffer started - iOS audio kept alive');
+            console.log('Silent buffer started');
         } catch (e) {
             console.error('Silent buffer failed:', e);
         }
@@ -102,9 +104,7 @@
             try {
                 silentBufferSource.stop();
                 silentBufferSource.disconnect();
-            } catch (e) {
-                // Ignore
-            }
+            } catch (e) { }
             silentBufferSource = null;
         }
     }
@@ -114,7 +114,6 @@
         if (!audioContext) {
             try {
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                console.log('AudioContext created, state:', audioContext.state);
             } catch (e) {
                 console.error('Failed to create AudioContext:', e);
                 return false;
@@ -135,15 +134,13 @@
     function unlockIOSAudio() {
         if (!audioContext) return;
         try {
-            // Short, quiet beep to unlock
             const osc = audioContext.createOscillator();
             const gain = audioContext.createGain();
             osc.connect(gain);
             gain.connect(audioContext.destination);
             osc.frequency.value = 440;
             gain.gain.setValueAtTime(0.001, audioContext.currentTime);
-            gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.01);
-            osc.start(audioContext.currentTime);
+            osc.start();
             osc.stop(audioContext.currentTime + 0.01);
 
             audioUnlocked = true;
@@ -156,20 +153,28 @@
 
     // ========== WAKE LOCK IMPLEMENTATION ==========
     async function requestWakeLock() {
+        // Clear any existing interval first
+        if (wakeLockInterval) {
+            clearInterval(wakeLockInterval);
+            wakeLockInterval = null;
+        }
+
         // Try Screen Wake Lock API first (iOS 16.4+)
         if ('wakeLock' in navigator) {
             try {
-                wakeLock = await navigator.wakeLock.request('screen');
-                console.log('Wake Lock acquired via API');
+                if (!wakeLock) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    console.log('Wake Lock acquired via API');
 
-                wakeLock.addEventListener('release', () => {
-                    console.log('Wake Lock released');
-                    wakeLock = null;
-                    if (isRunning && document.visibilityState === 'visible') {
-                        requestWakeLock();
-                    }
-                });
-                return true;
+                    wakeLock.addEventListener('release', () => {
+                        console.log('Wake Lock released by system');
+                        wakeLock = null;
+                        // Re-acquire if still in session (running or paused)
+                        if (sessionStartTime || isRunning) {
+                            requestWakeLock();
+                        }
+                    });
+                }
             } catch (e) {
                 console.log('Wake Lock API failed:', e.message);
             }
@@ -182,30 +187,37 @@
 
         if (noSleepVideo) {
             try {
-                noSleepVideo.muted = true;
-                const playPromise = noSleepVideo.play();
-
-                if (playPromise !== undefined) {
-                    await playPromise;
-                    console.log('Wake Lock acquired via video fallback');
-                    return true;
-                }
-            } catch (e) {
-                console.log('Video wake lock failed:', e.message);
-                try {
+                if (noSleepVideo.paused) {
                     noSleepVideo.muted = true;
                     await noSleepVideo.play();
-                    return true;
-                } catch (e2) {
-                    console.log('Second attempt failed:', e2.message);
+                    console.log('Video wake lock playing');
                 }
+            } catch (e) {
+                console.log('Video play failed:', e.message);
             }
         }
 
-        return false;
+        // Set up keep-alive interval to ensure video stays playing
+        // iOS sometimes pauses videos after a while
+        wakeLockInterval = setInterval(() => {
+            if (noSleepVideo && noSleepVideo.paused && (isRunning || sessionStartTime)) {
+                console.log('Video was paused, resuming...');
+                noSleepVideo.play().catch(() => { });
+            }
+            // Also re-check system wake lock
+            if ('wakeLock' in navigator && !wakeLock && (isRunning || sessionStartTime)) {
+                requestWakeLock();
+            }
+        }, 5000); // Check every 5 seconds
     }
 
     function releaseWakeLock() {
+        // Clear keep-alive
+        if (wakeLockInterval) {
+            clearInterval(wakeLockInterval);
+            wakeLockInterval = null;
+        }
+
         if (wakeLock) {
             wakeLock.release();
             wakeLock = null;
@@ -222,17 +234,18 @@
             noSleepVideo = document.createElement('video');
             noSleepVideo.setAttribute('playsinline', '');
             noSleepVideo.setAttribute('muted', '');
+            noSleepVideo.setAttribute('loop', '');
             noSleepVideo.muted = true;
             noSleepVideo.loop = true;
             noSleepVideo.autoplay = false;
 
-            // Properly formatted minimal WebM video (1x1 pixel, valid base64)
+            // Valid minimal WebM (1x1 pixel, 1 second, silent)
             const webmBase64 = 'GkXfo0AgQoaBAUL3gQFC8oEEQvOBCEKCChARWKuBslLh3DkljofL4YJAIAAAIAyAAAAA0q2fOzq2gQAAAAAADuH2Uzf4iBAAAABABjAAAAAAAABZAAjQOA0YBAABAAABgAAAQIDQAE6ADrHHj8MAA==';
 
             noSleepVideo.src = 'data:video/webm;base64,' + webmBase64;
-            noSleepVideo.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
+            noSleepVideo.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;z-index:-1;';
             document.body.appendChild(noSleepVideo);
-            console.log('NoSleep video element created');
+            console.log('NoSleep video created');
         } catch (e) {
             console.error('Failed to create NoSleep video:', e);
             noSleepVideo = null;
@@ -241,20 +254,15 @@
 
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
-            if (isRunning) {
+            // Re-acquire everything when app comes back to foreground
+            if (isRunning || sessionStartTime) {
                 requestWakeLock();
-                if (audioContext) {
-                    if (audioContext.state === 'suspended') {
-                        audioContext.resume().then(() => {
-                            if (soundEnabled && isRunning) startSilentBuffer();
-                        });
-                    } else if (soundEnabled && isRunning) {
+                if (audioContext && audioContext.state === 'suspended') {
+                    audioContext.resume().then(() => {
                         startSilentBuffer();
-                    }
+                    });
                 }
             }
-        } else {
-            stopSilentBuffer();
         }
     });
     // ========== END WAKE LOCK ==========
@@ -264,35 +272,38 @@
             try {
                 const { oscillator, gainNode } = currentTone;
                 const now = audioContext ? audioContext.currentTime : 0;
+                // Smooth fade out over 0.2 seconds to avoid click
                 gainNode.gain.cancelScheduledValues(now);
-                gainNode.gain.setValueAtTime(gainNode.gain.value || 0.0001, now);
-                gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.05);
-                oscillator.stop(now + 0.1);
-            } catch (e) {
-                // Ignore
-            }
+                gainNode.gain.setValueAtTime(gainNode.gain.value || 0.001, now);
+                gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
+                oscillator.stop(now + 0.25);
+            } catch (e) { }
             currentTone = null;
+            activePhaseName = null;
         }
     }
 
-    function playSustainedTone(frequency, durationMs) {
-        if (!soundEnabled) return;
-        if (!audioContext) return;
+    // Play sustained tone for the exact duration of the phase with smooth fade in/out
+    function playSustainedTone(frequency, durationMs, phaseName) {
+        if (!soundEnabled || !audioContext) return;
+
+        // Don't restart if already playing this exact phase
+        if (activePhaseName === phaseName && currentTone) return;
+
+        // Stop any previous tone first
+        stopCurrentTone();
+        activePhaseName = phaseName;
 
         if (audioContext.state === 'suspended') {
             audioContext.resume().then(() => {
-                actuallyPlaySustainedTone(frequency, durationMs);
-            }).catch(() => {
-                console.log('Could not resume audio context');
+                actuallyPlaySustainedTone(frequency, durationMs, phaseName);
             });
-        } else if (audioContext.state === 'running') {
-            actuallyPlaySustainedTone(frequency, durationMs);
+        } else {
+            actuallyPlaySustainedTone(frequency, durationMs, phaseName);
         }
     }
 
-    function actuallyPlaySustainedTone(frequency, durationMs) {
-        stopCurrentTone();
-
+    function actuallyPlaySustainedTone(frequency, durationMs, phaseName) {
         try {
             const oscillator = audioContext.createOscillator();
             const gainNode = audioContext.createGain();
@@ -305,27 +316,32 @@
 
             const now = audioContext.currentTime;
             const durationSec = durationMs / 1000;
-            const fadeInTime = Math.min(0.5, durationSec * 0.1);
-            const fadeOutTime = Math.min(1.0, durationSec * 0.2);
-            const maxVolume = 0.3;
 
+            // Smooth envelope: 20% fade in, 60% sustain, 20% fade out
+            const fadeInTime = Math.min(1.0, durationSec * 0.2);
+            const fadeOutTime = Math.min(1.5, durationSec * 0.2);
+            const sustainLevel = 0.4; // Slightly louder for better presence
+
+            // Schedule envelope
             gainNode.gain.setValueAtTime(0.0001, now);
-            gainNode.gain.exponentialRampToValueAtTime(maxVolume, now + fadeInTime);
-            gainNode.gain.setValueAtTime(maxVolume, now + durationSec - fadeOutTime);
+            gainNode.gain.exponentialRampToValueAtTime(sustainLevel, now + fadeInTime);
+            // Hold sustain until fade out
+            gainNode.gain.setValueAtTime(sustainLevel, now + durationSec - fadeOutTime);
             gainNode.gain.exponentialRampToValueAtTime(0.0001, now + durationSec);
 
             oscillator.start(now);
-            oscillator.stop(now + durationSec + 0.05);
+            oscillator.stop(now + durationSec + 0.1);
 
-            currentTone = { oscillator, gainNode };
+            currentTone = { oscillator, gainNode, phaseName };
 
             oscillator.onended = () => {
-                if (currentTone && currentTone.oscillator === oscillator) {
+                if (currentTone && currentTone.phaseName === phaseName) {
                     currentTone = null;
+                    activePhaseName = null;
                 }
             };
 
-            console.log('Tone:', frequency, 'Hz for', durationSec, 's');
+            console.log('Playing', phaseName, 'tone:', frequency, 'Hz for', durationSec, 'seconds');
         } catch (e) {
             console.error('Tone error:', e);
         }
@@ -359,9 +375,8 @@
 
             osc.start(now);
             osc.stop(now + 0.7);
-            console.log('Short tone:', frequency, 'Hz');
         } catch (e) {
-            console.error('Error playing short tone:', e);
+            console.error('Short tone error:', e);
         }
     }
 
@@ -416,16 +431,15 @@
     }
 
     function setupEventListeners() {
-        startBtn.addEventListener('click', () => {
+        // Start button handlers
+        const handleStart = (e) => {
+            if (e) e.preventDefault();
             initAudio();
             toggleSession();
-        });
+        };
 
-        startBtn.addEventListener('touchend', (e) => {
-            e.preventDefault();
-            initAudio();
-            toggleSession();
-        }, { passive: false });
+        startBtn.addEventListener('click', handleStart);
+        startBtn.addEventListener('touchend', handleStart, { passive: false });
 
         resetBtn.addEventListener('click', resetSession);
 
@@ -453,8 +467,10 @@
         });
 
         function handleSoundToggle(e) {
-            e.preventDefault();
-            e.stopPropagation();
+            if (e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
             initAudio();
 
             soundEnabled = !soundEnabled;
@@ -463,7 +479,7 @@
 
             if (soundEnabled && audioContext) {
                 audioContext.resume().then(() => {
-                    if (isRunning) startSilentBuffer();
+                    startSilentBuffer();
                     setTimeout(() => playShortTone(523.25), 50);
                 });
             } else {
@@ -473,41 +489,34 @@
         }
 
         soundBtn.addEventListener('touchend', handleSoundToggle, { passive: false });
-
         soundBtn.addEventListener('click', (e) => {
             if (e.pointerType === 'touch') return;
             handleSoundToggle(e);
         });
 
+        // Tap circle to start/pause
         const breathingContainer = document.querySelector('.breathing-container');
-
-        breathingContainer.addEventListener('click', (e) => {
+        const handleContainerTap = (e) => {
             if (!e.target.closest('.controls')) {
+                if (e) e.preventDefault();
                 initAudio();
                 toggleSession();
             }
-        });
-
-        breathingContainer.addEventListener('touchend', (e) => {
-            if (!e.target.closest('.controls')) {
-                e.preventDefault();
-                initAudio();
-                toggleSession();
-            }
-        }, { passive: false });
-
-        const unlockAudioOnTouch = () => {
-            initAudio();
-            document.removeEventListener('touchstart', unlockAudioOnTouch);
-            document.removeEventListener('touchend', unlockAudioOnTouch);
         };
 
-        document.addEventListener('touchstart', unlockAudioOnTouch, { passive: true });
-        document.addEventListener('touchend', unlockAudioOnTouch, { passive: true });
+        breathingContainer.addEventListener('click', handleContainerTap);
+        breathingContainer.addEventListener('touchend', handleContainerTap, { passive: false });
 
-        document.addEventListener('mousedown', () => {
+        // Global unlock on first interaction
+        const unlockOnce = () => {
             initAudio();
-        }, { once: true });
+            document.removeEventListener('touchstart', unlockOnce);
+            document.removeEventListener('touchend', unlockOnce);
+            document.removeEventListener('click', unlockOnce);
+        };
+        document.addEventListener('touchstart', unlockOnce, { passive: true, once: true });
+        document.addEventListener('touchend', unlockOnce, { passive: true, once: true });
+        document.addEventListener('click', unlockOnce, { once: true });
     }
 
     function updateSoundButton() {
@@ -520,7 +529,8 @@
 
         const frequency = TONE_FREQUENCIES[phaseName];
         if (frequency && soundEnabled) {
-            playSustainedTone(frequency, phaseDurationMs);
+            // Play tone for the full duration of this phase
+            playSustainedTone(frequency, phaseDurationMs, phaseName);
         }
     }
 
@@ -554,7 +564,7 @@
         exerciseBtns.forEach(btn => btn.style.pointerEvents = 'none');
         timerBtns.forEach(btn => btn.style.pointerEvents = 'none');
 
-        // CRITICAL: Request wake lock immediately in user gesture
+        // Keep screen on (works for running and paused states)
         requestWakeLock();
 
         if (soundEnabled) startSilentBuffer();
@@ -577,9 +587,12 @@
         playIcon.classList.remove('hidden');
         pauseIcon.classList.add('hidden');
 
+        // Stop sound but KEEP screen wake lock active!
         stopCurrentTone();
-        stopSilentBuffer();
-        releaseWakeLock();
+        // Don't stop silent buffer - keep audio context warm
+
+        // NOTE: We do NOT release wake lock here, so screen stays on while paused
+        // This allows user to resume without unlocking phone
 
         if (sessionDuration > 0 && sessionStartTime) {
             const elapsed = (performance.now() - sessionStartTime) / 1000;
@@ -591,7 +604,7 @@
             animationFrameId = null;
         }
 
-        instruction.textContent = 'Paused';
+        instruction.textContent = 'Paused - Tap to resume';
         phaseTimer.textContent = '';
     }
 
@@ -603,9 +616,12 @@
         sessionStartTime = null;
         pausedTimeRemaining = null;
         lastPhaseName = null;
+        activePhaseName = null;
 
         stopCurrentTone();
         stopSilentBuffer();
+
+        // Only release wake lock when fully reset
         releaseWakeLock();
 
         if (animationFrameId) {
@@ -630,7 +646,8 @@
 
         stopCurrentTone();
         stopSilentBuffer();
-        releaseWakeLock();
+        // Keep wake lock for a moment so user sees "Complete", then release
+        setTimeout(releaseWakeLock, 2000);
 
         if (animationFrameId) {
             cancelAnimationFrame(animationFrameId);
@@ -662,6 +679,7 @@
         const remaining = Math.ceil((phase.duration - elapsed) / 1000);
         phaseTimer.textContent = remaining > 0 ? `${remaining}s` : '';
 
+        // Trigger phase sound - only once per phase change
         onPhaseChange(phase.name, phase.duration);
 
         updateTimeRemaining(now);
@@ -684,7 +702,7 @@
             }
 
             phaseStartTime = now;
-            lastPhaseName = null;
+            lastPhaseName = null; // Reset to trigger next phase sound
         }
 
         animationFrameId = requestAnimationFrame(runAnimation);
