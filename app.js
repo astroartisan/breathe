@@ -1,4 +1,4 @@
-(function() {
+(function () {
     'use strict';
 
     // Exercise configurations
@@ -76,28 +76,51 @@
             }
         }
 
-        // Resume synchronously for iOS
-        if (audioContext.state === 'suspended') {
-            audioContext.resume();
-        }
-
-        // iOS unlock: must play actual audio in same call stack as user gesture
+        // iOS unlock sequence - must happen synchronously in user gesture
         if (!audioUnlocked && audioContext) {
+            // First, try to resume (required for iOS)
+            const resumePromise = audioContext.resume();
+
+            // Play unlock tone immediately (don't wait for promise)
+            // iOS needs this in the same call stack as the gesture
             try {
-                // Play a real (but very quiet) tone to unlock iOS audio
+                // Create a short, audible tone to force iOS to unlock
                 const osc = audioContext.createOscillator();
                 const gain = audioContext.createGain();
                 osc.connect(gain);
                 gain.connect(audioContext.destination);
-                osc.frequency.value = 1; // Very low frequency (inaudible)
-                gain.gain.value = 0.001; // Very quiet
-                osc.start(0);
-                osc.stop(audioContext.currentTime + 0.5);
-                audioUnlocked = true;
-                console.log('Audio unlocked for iOS');
+
+                // Use audible frequency - iOS ignores inaudible ones
+                osc.type = 'sine';
+                osc.frequency.value = 440;
+
+                // Very brief, quiet beep
+                const now = audioContext.currentTime;
+                gain.gain.setValueAtTime(0.001, now);
+                gain.gain.linearRampToValueAtTime(0.05, now + 0.01);
+                gain.gain.linearRampToValueAtTime(0.001, now + 0.05);
+
+                osc.start(now);
+                osc.stop(now + 0.1);
+
+                console.log('iOS unlock tone played, context state:', audioContext.state);
             } catch (e) {
-                console.error('iOS unlock failed:', e);
+                console.error('iOS unlock tone failed:', e);
             }
+
+            // Also handle the resume promise
+            resumePromise.then(() => {
+                audioUnlocked = true;
+                console.log('AudioContext resumed, state:', audioContext.state);
+            }).catch(e => {
+                console.error('Resume failed:', e);
+            });
+
+            // Mark as unlocked optimistically (the tone was played in user gesture)
+            audioUnlocked = true;
+        } else if (audioContext.state === 'suspended') {
+            // Already unlocked but suspended (e.g., tab was backgrounded)
+            audioContext.resume();
         }
 
         return true;
@@ -124,17 +147,27 @@
     // Play a sustained tone for a breathing phase
     // durationMs: how long the phase lasts
     function playSustainedTone(frequency, durationMs) {
-        if (!soundEnabled || !audioContext) return;
-
-        // Ensure context is running
-        if (audioContext.state === 'suspended') {
-            audioContext.resume().then(() => {
-                actuallyPlaySustainedTone(frequency, durationMs);
-            });
+        if (!soundEnabled) {
+            console.log('Sound not enabled, skipping tone');
+            return;
+        }
+        if (!audioContext) {
+            console.log('No audio context');
             return;
         }
 
-        actuallyPlaySustainedTone(frequency, durationMs);
+        console.log('playSustainedTone:', frequency, 'Hz, context state:', audioContext.state);
+
+        // Always try to resume first (iOS may have suspended it)
+        audioContext.resume().then(() => {
+            console.log('Context resumed, state now:', audioContext.state);
+            // Small delay for iOS to fully activate
+            setTimeout(() => {
+                actuallyPlaySustainedTone(frequency, durationMs);
+            }, 10);
+        }).catch(e => {
+            console.error('Resume failed:', e);
+        });
     }
 
     function actuallyPlaySustainedTone(frequency, durationMs) {
@@ -274,10 +307,38 @@
 
     // Setup event listeners
     function setupEventListeners() {
-        startBtn.addEventListener('click', () => {
+        // Helper: in-gesture immediate play for iOS unlock
+        function immediatePlayPhaseToneIfNeeded() {
+            if (!soundEnabled || !audioContext) return;
+            try {
+                const exercise = EXERCISES[currentExercise];
+                const phase = exercise.phases[currentPhaseIndex];
+                const freq = TONE_FREQUENCIES[phase.name];
+                if (freq) {
+                    // Play the sustained tone immediately in the same gesture
+                    actuallyPlaySustainedTone(freq, phase.duration);
+                }
+            } catch (e) {
+                console.error('Immediate play failed:', e);
+            }
+        }
+
+        // Start button - click for desktop
+        startBtn.addEventListener('click', (e) => {
             initAudio();
+            // Try to play the phase tone synchronously so iOS treats audio as user-initiated
+            immediatePlayPhaseToneIfNeeded();
             toggleSession();
         });
+
+        // Start button - touchend for iOS (more reliable for audio)
+        startBtn.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            initAudio();
+            immediatePlayPhaseToneIfNeeded();
+            toggleSession();
+        }, { passive: false });
+
         resetBtn.addEventListener('click', resetSession);
 
         exerciseBtns.forEach(btn => {
@@ -303,54 +364,77 @@
             });
         });
 
-        // Sound button - iOS requires everything in the same touch handler
-        soundBtn.addEventListener('click', (e) => {
+        // Sound button handler - shared logic
+        function handleSoundToggle(e) {
+            e.preventDefault();
             e.stopPropagation();
 
-            // MUST init audio in the click handler for iOS
+            // MUST init audio in the touch/click handler for iOS
             initAudio();
 
             soundEnabled = !soundEnabled;
             updateSoundButton();
             saveState();
 
-            // Play test tone when enabling
+            // Play test tone when enabling. Try to play immediately in-gesture
             if (soundEnabled && audioContext) {
-                // For iOS: ensure we're resumed, then play
-                if (audioContext.state !== 'running') {
-                    audioContext.resume().then(() => {
-                        playShortTone(523.25);
-                    });
-                } else {
-                    playShortTone(523.25);
+                try {
+                    actuallyPlayShortTone(523.25);
+                } catch (e) {
+                    // Fallback to resume+async play if immediate play fails
+                    audioContext.resume().then(() => playShortTone(523.25)).catch(() => { });
                 }
             } else {
                 // Sound disabled - stop any playing tone
                 stopCurrentTone();
             }
+        }
+
+        // iOS: touchend is more reliable than click for audio
+        soundBtn.addEventListener('touchend', handleSoundToggle, { passive: false });
+
+        // Desktop: use click
+        soundBtn.addEventListener('click', (e) => {
+            // Avoid double-firing on touch devices
+            if (e.pointerType === 'touch') return;
+            handleSoundToggle(e);
         });
 
         // Allow tapping the circle to start
-        document.querySelector('.breathing-container').addEventListener('click', (e) => {
+        const breathingContainer = document.querySelector('.breathing-container');
+
+        breathingContainer.addEventListener('click', (e) => {
             if (!e.target.closest('.controls')) {
                 initAudio();
                 toggleSession();
             }
         });
 
-        // iOS: Also listen for touchstart to unlock audio (more reliable than click)
-        document.addEventListener('touchstart', function unlockAudio() {
-            initAudio();
-            // Only need this once
-            document.removeEventListener('touchstart', unlockAudio);
-            console.log('Audio unlocked via touchstart');
-        }, { once: true });
+        // iOS: touchend on container to start (more reliable for audio)
+        breathingContainer.addEventListener('touchend', (e) => {
+            if (!e.target.closest('.controls')) {
+                e.preventDefault();
+                initAudio();
+                toggleSession();
+            }
+        }, { passive: false });
 
-        // Also for mouse users
-        document.addEventListener('mousedown', function unlockAudioMouse() {
+        // iOS: Unlock audio on first touch anywhere
+        // Must use touchend (not touchstart) for iOS audio unlock
+        const unlockAudioOnTouch = (e) => {
+            console.log('Touch detected, unlocking audio...');
             initAudio();
-            document.removeEventListener('mousedown', unlockAudioMouse);
-            console.log('Audio unlocked via mousedown');
+            // Remove after first successful unlock
+            document.removeEventListener('touchstart', unlockAudioOnTouch);
+            document.removeEventListener('touchend', unlockAudioOnTouch);
+        };
+
+        document.addEventListener('touchstart', unlockAudioOnTouch, { passive: true });
+        document.addEventListener('touchend', unlockAudioOnTouch, { passive: true });
+
+        // Mouse users
+        document.addEventListener('mousedown', () => {
+            initAudio();
         }, { once: true });
     }
 
