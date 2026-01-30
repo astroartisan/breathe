@@ -81,46 +81,46 @@
             // First, try to resume (required for iOS)
             const resumePromise = audioContext.resume();
 
-            // Play unlock tone immediately (don't wait for promise)
-            // iOS needs this in the same call stack as the gesture
+            // Play unlock tone immediately (don't wait for promise).
+            // Use a slightly louder, short beep so iOS recognizes it as audible user-initiated audio.
             try {
-                // Create a short, audible tone to force iOS to unlock
                 const osc = audioContext.createOscillator();
                 const gain = audioContext.createGain();
                 osc.connect(gain);
                 gain.connect(audioContext.destination);
 
-                // Use audible frequency - iOS ignores inaudible ones
                 osc.type = 'sine';
                 osc.frequency.value = 440;
 
-                // Very brief, quiet beep
                 const now = audioContext.currentTime;
+                // Start very quiet then ramp to audible then back down
                 gain.gain.setValueAtTime(0.001, now);
-                gain.gain.linearRampToValueAtTime(0.05, now + 0.01);
-                gain.gain.linearRampToValueAtTime(0.001, now + 0.05);
+                gain.gain.linearRampToValueAtTime(0.2, now + 0.01);
+                gain.gain.linearRampToValueAtTime(0.001, now + 0.12);
 
                 osc.start(now);
-                osc.stop(now + 0.1);
+                osc.stop(now + 0.14);
 
-                console.log('iOS unlock tone played, context state:', audioContext.state);
+                console.log('iOS unlock tone played (louder), context state:', audioContext.state);
             } catch (e) {
                 console.error('iOS unlock tone failed:', e);
             }
 
-            // Also handle the resume promise
+            // Set audioUnlocked only when resume resolves successfully
             resumePromise.then(() => {
                 audioUnlocked = true;
                 console.log('AudioContext resumed, state:', audioContext.state);
             }).catch(e => {
                 console.error('Resume failed:', e);
             });
-
-            // Mark as unlocked optimistically (the tone was played in user gesture)
-            audioUnlocked = true;
         } else if (audioContext.state === 'suspended') {
-            // Already unlocked but suspended (e.g., tab was backgrounded)
-            audioContext.resume();
+            // Already created but suspended (e.g., page was backgrounded)
+            audioContext.resume().then(() => {
+                audioUnlocked = true;
+                console.log('AudioContext resumed from suspended state');
+            }).catch(e => {
+                console.error('Resume from suspended failed:', e);
+            });
         }
 
         return true;
@@ -320,6 +320,78 @@
                 }
             } catch (e) {
                 console.error('Immediate play failed:', e);
+                // Fallback to HTMLAudioElement beep to force unlock on iOS
+                try { playBeepViaAudioElement(523.25, 120); } catch (err) { console.error(err); }
+            }
+        }
+
+        // Fallback: generate a short WAV blob (sine beep) and play via an Audio element.
+        // This can succeed on iOS where WebAudio creation/resume is still blocked.
+        function makeBeepWavBlob(frequency = 440, durationMs = 120, sampleRate = 22050) {
+            const durationSec = durationMs / 1000;
+            const sampleCount = Math.floor(sampleRate * durationSec);
+            const samples = new Int16Array(sampleCount);
+            const amplitude = 0.5 * 0x7fff; // 50% amplitude
+
+            for (let i = 0; i < sampleCount; i++) {
+                const t = i / sampleRate;
+                samples[i] = Math.max(-32767, Math.min(32767, Math.round(amplitude * Math.sin(2 * Math.PI * frequency * t))));
+            }
+
+            // WAV header
+            const buffer = new ArrayBuffer(44 + samples.length * 2);
+            const view = new DataView(buffer);
+
+            function writeString(offset, str) {
+                for (let i = 0; i < str.length; i++) {
+                    view.setUint8(offset + i, str.charCodeAt(i));
+                }
+            }
+
+            writeString(0, 'RIFF');
+            view.setUint32(4, 36 + samples.length * 2, true);
+            writeString(8, 'WAVE');
+            writeString(12, 'fmt ');
+            view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
+            view.setUint16(20, 1, true); // PCM format
+            view.setUint16(22, 1, true); // channels
+            view.setUint32(24, sampleRate, true); // sample rate
+            view.setUint32(28, sampleRate * 2, true); // byte rate (sampleRate * blockAlign)
+            view.setUint16(32, 2, true); // block align (numChannels * bytesPerSample)
+            view.setUint16(34, 16, true); // bits per sample
+            writeString(36, 'data');
+            view.setUint32(40, samples.length * 2, true);
+
+            // PCM samples
+            let offset = 44;
+            for (let i = 0; i < samples.length; i++, offset += 2) {
+                view.setInt16(offset, samples[i], true);
+            }
+
+            return new Blob([view], { type: 'audio/wav' });
+        }
+
+        function playBeepViaAudioElement(frequency = 440, durationMs = 120) {
+            try {
+                const blob = makeBeepWavBlob(frequency, durationMs);
+                const url = URL.createObjectURL(blob);
+                const audio = new Audio(url);
+                audio.loop = false;
+                audio.volume = 0.6;
+                const p = audio.play();
+                if (p && p.catch) {
+                    p.catch(err => {
+                        console.warn('AudioElement play failed:', err);
+                        URL.revokeObjectURL(url);
+                    });
+                }
+                // Cleanup after playback
+                setTimeout(() => {
+                    audio.pause();
+                    URL.revokeObjectURL(url);
+                }, durationMs + 300);
+            } catch (e) {
+                console.error('playBeepViaAudioElement failed:', e);
             }
         }
 
@@ -381,7 +453,10 @@
                 try {
                     actuallyPlayShortTone(523.25);
                 } catch (e) {
-                    // Fallback to resume+async play if immediate play fails
+                    console.warn('actuallyPlayShortTone failed, falling back to AudioElement:', e);
+                    // Try in-memory WAV via Audio element as a robust fallback for iOS
+                    try { playBeepViaAudioElement(523.25, 120); } catch (err) { console.error(err); }
+                    // Also attempt resume+async play as a secondary fallback
                     audioContext.resume().then(() => playShortTone(523.25)).catch(() => { });
                 }
             } else {
