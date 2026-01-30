@@ -1,4 +1,4 @@
-(function () {
+(function() {
     'use strict';
 
     // Exercise configurations
@@ -35,6 +35,11 @@
     let audioContext = null;
     let audioUnlocked = false;
     let currentTone = null; // Track the currently playing sustained tone
+    let silentOscillator = null; // Keep audio context alive on iOS
+
+    // Wake Lock for preventing screen sleep
+    let wakeLock = null;
+    let noSleepVideo = null; // Fallback for older iOS
 
     // State
     let currentExercise = 'relaxing';
@@ -81,50 +86,175 @@
             // First, try to resume (required for iOS)
             const resumePromise = audioContext.resume();
 
-            // Play unlock tone immediately (don't wait for promise).
-            // Use a slightly louder, short beep so iOS recognizes it as audible user-initiated audio.
+            // Play unlock tone immediately (don't wait for promise)
+            // iOS needs this in the same call stack as the gesture
             try {
+                // Create a short, audible tone to force iOS to unlock
                 const osc = audioContext.createOscillator();
                 const gain = audioContext.createGain();
                 osc.connect(gain);
                 gain.connect(audioContext.destination);
 
+                // Use audible frequency - iOS ignores inaudible ones
                 osc.type = 'sine';
                 osc.frequency.value = 440;
 
+                // Very brief, quiet beep
                 const now = audioContext.currentTime;
-                // Start very quiet then ramp to audible then back down
                 gain.gain.setValueAtTime(0.001, now);
-                gain.gain.linearRampToValueAtTime(0.2, now + 0.01);
-                gain.gain.linearRampToValueAtTime(0.001, now + 0.12);
+                gain.gain.linearRampToValueAtTime(0.05, now + 0.01);
+                gain.gain.linearRampToValueAtTime(0.001, now + 0.05);
 
                 osc.start(now);
-                osc.stop(now + 0.14);
+                osc.stop(now + 0.1);
 
-                console.log('iOS unlock tone played (louder), context state:', audioContext.state);
+                console.log('iOS unlock tone played, context state:', audioContext.state);
             } catch (e) {
                 console.error('iOS unlock tone failed:', e);
             }
 
-            // Set audioUnlocked only when resume resolves successfully
+            // Also handle the resume promise
             resumePromise.then(() => {
                 audioUnlocked = true;
                 console.log('AudioContext resumed, state:', audioContext.state);
             }).catch(e => {
                 console.error('Resume failed:', e);
             });
+
+            // Mark as unlocked optimistically (the tone was played in user gesture)
+            audioUnlocked = true;
         } else if (audioContext.state === 'suspended') {
-            // Already created but suspended (e.g., page was backgrounded)
-            audioContext.resume().then(() => {
-                audioUnlocked = true;
-                console.log('AudioContext resumed from suspended state');
-            }).catch(e => {
-                console.error('Resume from suspended failed:', e);
-            });
+            // Already unlocked but suspended (e.g., tab was backgrounded)
+            audioContext.resume();
         }
 
         return true;
     }
+
+    // Start a silent oscillator to keep audio context alive on iOS
+    // This prevents iOS from suspending the context between tones
+    function startSilentOscillator() {
+        if (!audioContext || silentOscillator) return;
+
+        try {
+            silentOscillator = audioContext.createOscillator();
+            const silentGain = audioContext.createGain();
+            silentGain.gain.value = 0; // Completely silent
+            silentOscillator.connect(silentGain);
+            silentGain.connect(audioContext.destination);
+            silentOscillator.start();
+            console.log('Silent oscillator started to keep audio context alive');
+        } catch (e) {
+            console.error('Failed to start silent oscillator:', e);
+        }
+    }
+
+    // Stop the silent oscillator
+    function stopSilentOscillator() {
+        if (silentOscillator) {
+            try {
+                silentOscillator.stop();
+            } catch (e) {
+                // Ignore - might already be stopped
+            }
+            silentOscillator = null;
+        }
+    }
+
+    // ========== WAKE LOCK IMPLEMENTATION ==========
+    // Prevents screen from auto-locking during breathing sessions
+
+    // Request wake lock using modern API
+    async function requestWakeLock() {
+        // Try Screen Wake Lock API first (iOS 16.4+, modern browsers)
+        if ('wakeLock' in navigator) {
+            try {
+                wakeLock = await navigator.wakeLock.request('screen');
+                console.log('Wake Lock acquired via API');
+
+                // Re-acquire if released (e.g., tab switch)
+                wakeLock.addEventListener('release', () => {
+                    console.log('Wake Lock released');
+                    wakeLock = null;
+                    // Re-acquire if still running
+                    if (isRunning) {
+                        requestWakeLock();
+                    }
+                });
+                return true;
+            } catch (e) {
+                console.log('Wake Lock API failed:', e.message);
+            }
+        }
+
+        // Fallback: NoSleep video trick for older iOS
+        // Playing a tiny video keeps the screen awake
+        if (!noSleepVideo) {
+            createNoSleepVideo();
+        }
+        if (noSleepVideo) {
+            try {
+                // The video must be triggered from a user gesture
+                await noSleepVideo.play();
+                console.log('Wake Lock acquired via video fallback');
+                return true;
+            } catch (e) {
+                console.log('Video wake lock failed:', e.message);
+            }
+        }
+
+        return false;
+    }
+
+    // Release wake lock
+    function releaseWakeLock() {
+        if (wakeLock) {
+            wakeLock.release();
+            wakeLock = null;
+            console.log('Wake Lock released');
+        }
+        if (noSleepVideo) {
+            noSleepVideo.pause();
+            console.log('Video wake lock released');
+        }
+    }
+
+    // Create a tiny looping video for the NoSleep fallback
+    // This uses a data URI of a minimal webm video
+    function createNoSleepVideo() {
+        try {
+            noSleepVideo = document.createElement('video');
+            noSleepVideo.setAttribute('playsinline', '');
+            noSleepVideo.setAttribute('muted', '');
+            noSleepVideo.muted = true;
+            noSleepVideo.loop = true;
+
+            // Minimal webm video (base64 encoded)
+            // This is a tiny 1x1 pixel, 1 frame webm that loops
+            const webmBase64 = 'GkXfowEAAAAAAAAfQoaBAUL3gQFC8oEEQvOBCEKChHdlYm1Ch4EEQoWBAhhTgGcBAAAAAAAVkhFNm3RALE27i1OrhBVJqWZTrIHfTbuMU6uEFlSua1OsggEwTbuMU6uEHFO7a1OsggHL';
+
+            noSleepVideo.src = 'data:video/webm;base64,' + webmBase64;
+            noSleepVideo.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px;';
+            document.body.appendChild(noSleepVideo);
+            console.log('NoSleep video element created');
+        } catch (e) {
+            console.error('Failed to create NoSleep video:', e);
+            noSleepVideo = null;
+        }
+    }
+
+    // Re-acquire wake lock when page becomes visible again
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && isRunning) {
+            requestWakeLock();
+            // Also resume audio context if needed
+            if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+        }
+    });
+
+    // ========== END WAKE LOCK ==========
 
     // Stop any currently playing tone
     function stopCurrentTone() {
@@ -146,9 +276,10 @@
 
     // Play a sustained tone for a breathing phase
     // durationMs: how long the phase lasts
+    // NOTE: This is called from the animation loop, not a user gesture,
+    // so we rely on the silent oscillator keeping the context alive
     function playSustainedTone(frequency, durationMs) {
         if (!soundEnabled) {
-            console.log('Sound not enabled, skipping tone');
             return;
         }
         if (!audioContext) {
@@ -156,18 +287,18 @@
             return;
         }
 
-        console.log('playSustainedTone:', frequency, 'Hz, context state:', audioContext.state);
+        // If context is suspended, try to resume (won't work without user gesture but worth trying)
+        if (audioContext.state === 'suspended') {
+            audioContext.resume().catch(() => {});
+        }
 
-        // Always try to resume first (iOS may have suspended it)
-        audioContext.resume().then(() => {
-            console.log('Context resumed, state now:', audioContext.state);
-            // Small delay for iOS to fully activate
-            setTimeout(() => {
-                actuallyPlaySustainedTone(frequency, durationMs);
-            }, 10);
-        }).catch(e => {
-            console.error('Resume failed:', e);
-        });
+        // Don't wait for promise - play immediately if context is running
+        // The silent oscillator should keep the context alive
+        if (audioContext.state === 'running') {
+            actuallyPlaySustainedTone(frequency, durationMs);
+        } else {
+            console.log('Audio context not running, state:', audioContext.state);
+        }
     }
 
     function actuallyPlaySustainedTone(frequency, durationMs) {
@@ -307,99 +438,9 @@
 
     // Setup event listeners
     function setupEventListeners() {
-        // Helper: in-gesture immediate play for iOS unlock
-        function immediatePlayPhaseToneIfNeeded() {
-            if (!soundEnabled || !audioContext) return;
-            try {
-                const exercise = EXERCISES[currentExercise];
-                const phase = exercise.phases[currentPhaseIndex];
-                const freq = TONE_FREQUENCIES[phase.name];
-                if (freq) {
-                    // Play the sustained tone immediately in the same gesture
-                    actuallyPlaySustainedTone(freq, phase.duration);
-                }
-            } catch (e) {
-                console.error('Immediate play failed:', e);
-                // Fallback to HTMLAudioElement beep to force unlock on iOS
-                try { playBeepViaAudioElement(523.25, 120); } catch (err) { console.error(err); }
-            }
-        }
-
-        // Fallback: generate a short WAV blob (sine beep) and play via an Audio element.
-        // This can succeed on iOS where WebAudio creation/resume is still blocked.
-        function makeBeepWavBlob(frequency = 440, durationMs = 120, sampleRate = 22050) {
-            const durationSec = durationMs / 1000;
-            const sampleCount = Math.floor(sampleRate * durationSec);
-            const samples = new Int16Array(sampleCount);
-            const amplitude = 0.5 * 0x7fff; // 50% amplitude
-
-            for (let i = 0; i < sampleCount; i++) {
-                const t = i / sampleRate;
-                samples[i] = Math.max(-32767, Math.min(32767, Math.round(amplitude * Math.sin(2 * Math.PI * frequency * t))));
-            }
-
-            // WAV header
-            const buffer = new ArrayBuffer(44 + samples.length * 2);
-            const view = new DataView(buffer);
-
-            function writeString(offset, str) {
-                for (let i = 0; i < str.length; i++) {
-                    view.setUint8(offset + i, str.charCodeAt(i));
-                }
-            }
-
-            writeString(0, 'RIFF');
-            view.setUint32(4, 36 + samples.length * 2, true);
-            writeString(8, 'WAVE');
-            writeString(12, 'fmt ');
-            view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
-            view.setUint16(20, 1, true); // PCM format
-            view.setUint16(22, 1, true); // channels
-            view.setUint32(24, sampleRate, true); // sample rate
-            view.setUint32(28, sampleRate * 2, true); // byte rate (sampleRate * blockAlign)
-            view.setUint16(32, 2, true); // block align (numChannels * bytesPerSample)
-            view.setUint16(34, 16, true); // bits per sample
-            writeString(36, 'data');
-            view.setUint32(40, samples.length * 2, true);
-
-            // PCM samples
-            let offset = 44;
-            for (let i = 0; i < samples.length; i++, offset += 2) {
-                view.setInt16(offset, samples[i], true);
-            }
-
-            return new Blob([view], { type: 'audio/wav' });
-        }
-
-        function playBeepViaAudioElement(frequency = 440, durationMs = 120) {
-            try {
-                const blob = makeBeepWavBlob(frequency, durationMs);
-                const url = URL.createObjectURL(blob);
-                const audio = new Audio(url);
-                audio.loop = false;
-                audio.volume = 0.6;
-                const p = audio.play();
-                if (p && p.catch) {
-                    p.catch(err => {
-                        console.warn('AudioElement play failed:', err);
-                        URL.revokeObjectURL(url);
-                    });
-                }
-                // Cleanup after playback
-                setTimeout(() => {
-                    audio.pause();
-                    URL.revokeObjectURL(url);
-                }, durationMs + 300);
-            } catch (e) {
-                console.error('playBeepViaAudioElement failed:', e);
-            }
-        }
-
         // Start button - click for desktop
-        startBtn.addEventListener('click', (e) => {
+        startBtn.addEventListener('click', () => {
             initAudio();
-            // Try to play the phase tone synchronously so iOS treats audio as user-initiated
-            immediatePlayPhaseToneIfNeeded();
             toggleSession();
         });
 
@@ -407,7 +448,6 @@
         startBtn.addEventListener('touchend', (e) => {
             e.preventDefault();
             initAudio();
-            immediatePlayPhaseToneIfNeeded();
             toggleSession();
         }, { passive: false });
 
@@ -448,20 +488,23 @@
             updateSoundButton();
             saveState();
 
-            // Play test tone when enabling. Try to play immediately in-gesture
+            // Play test tone when enabling
             if (soundEnabled && audioContext) {
-                try {
-                    actuallyPlayShortTone(523.25);
-                } catch (e) {
-                    console.warn('actuallyPlayShortTone failed, falling back to AudioElement:', e);
-                    // Try in-memory WAV via Audio element as a robust fallback for iOS
-                    try { playBeepViaAudioElement(523.25, 120); } catch (err) { console.error(err); }
-                    // Also attempt resume+async play as a secondary fallback
-                    audioContext.resume().then(() => playShortTone(523.25)).catch(() => { });
-                }
+                // Force resume and play
+                audioContext.resume().then(() => {
+                    // Start silent oscillator if session is running
+                    if (isRunning) {
+                        startSilentOscillator();
+                    }
+                    // Small delay to ensure iOS is ready
+                    setTimeout(() => {
+                        playShortTone(523.25);
+                    }, 50);
+                });
             } else {
-                // Sound disabled - stop any playing tone
+                // Sound disabled - stop any playing tone and silent oscillator
                 stopCurrentTone();
+                stopSilentOscillator();
             }
         }
 
@@ -566,6 +609,14 @@
         exerciseBtns.forEach(btn => btn.style.pointerEvents = 'none');
         timerBtns.forEach(btn => btn.style.pointerEvents = 'none');
 
+        // Request wake lock to prevent screen sleep (called from user gesture)
+        requestWakeLock();
+
+        // Start silent oscillator to keep audio context alive on iOS
+        if (soundEnabled && audioContext) {
+            startSilentOscillator();
+        }
+
         const now = performance.now();
         phaseStartTime = now;
 
@@ -586,8 +637,12 @@
         playIcon.classList.remove('hidden');
         pauseIcon.classList.add('hidden');
 
-        // Stop any playing tone
+        // Stop any playing tone and silent oscillator
         stopCurrentTone();
+        stopSilentOscillator();
+
+        // Release wake lock when paused
+        releaseWakeLock();
 
         // Save remaining time for resume
         if (sessionDuration > 0 && sessionStartTime) {
@@ -614,8 +669,12 @@
         pausedTimeRemaining = null;
         lastPhaseName = null;
 
-        // Stop any playing tone
+        // Stop any playing tone and silent oscillator
         stopCurrentTone();
+        stopSilentOscillator();
+
+        // Release wake lock
+        releaseWakeLock();
 
         if (animationFrameId) {
             cancelAnimationFrame(animationFrameId);
@@ -642,6 +701,10 @@
 
         // Stop any playing tone first
         stopCurrentTone();
+        stopSilentOscillator();
+
+        // Release wake lock
+        releaseWakeLock();
 
         if (animationFrameId) {
             cancelAnimationFrame(animationFrameId);
