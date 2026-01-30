@@ -1,4 +1,4 @@
-(function() {
+(function () {
     'use strict';
 
     // Exercise configurations
@@ -31,11 +31,11 @@
         'Breathe out': 329.63   // E4 - warm, releasing
     };
 
-    // Audio context (created on first user interaction)
+    // Audio context and nodes
     let audioContext = null;
     let audioUnlocked = false;
-    let currentTone = null; // Track the currently playing sustained tone
-    let silentOscillator = null; // Keep audio context alive on iOS
+    let currentTone = null;
+    let silentBufferSource = null; // Keep alive buffer for iOS
 
     // Wake Lock for preventing screen sleep
     let wakeLock = null;
@@ -68,8 +68,48 @@
     const timerBtns = document.querySelectorAll('.timer-btn:not(.sound-btn)');
     const soundBtn = document.getElementById('sound-btn');
 
+    // iOS specific: create silent buffer to keep audio context alive
+    function createSilentBuffer() {
+        if (!audioContext) return;
+        const buffer = audioContext.createBuffer(1, audioContext.sampleRate, audioContext.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < buffer.length; i++) {
+            data[i] = 0;
+        }
+        return buffer;
+    }
+
+    function startSilentBuffer() {
+        if (!audioContext || silentBufferSource) return;
+        try {
+            const buffer = createSilentBuffer();
+            silentBufferSource = audioContext.createBufferSource();
+            silentBufferSource.buffer = buffer;
+            silentBufferSource.loop = true;
+            const gain = audioContext.createGain();
+            gain.gain.value = 0; // Silent
+            silentBufferSource.connect(gain);
+            gain.connect(audioContext.destination);
+            silentBufferSource.start();
+            console.log('Silent buffer started - iOS audio kept alive');
+        } catch (e) {
+            console.error('Silent buffer failed:', e);
+        }
+    }
+
+    function stopSilentBuffer() {
+        if (silentBufferSource) {
+            try {
+                silentBufferSource.stop();
+                silentBufferSource.disconnect();
+            } catch (e) {
+                // Ignore
+            }
+            silentBufferSource = null;
+        }
+    }
+
     // Initialize audio context (must be called from user gesture)
-    // iOS is VERY strict - must create, resume, AND play in same synchronous gesture
     function initAudio() {
         if (!audioContext) {
             try {
@@ -81,103 +121,51 @@
             }
         }
 
-        // iOS unlock sequence - must happen synchronously in user gesture
-        if (!audioUnlocked && audioContext) {
-            // First, try to resume (required for iOS)
-            const resumePromise = audioContext.resume();
-
-            // Play unlock tone immediately (don't wait for promise)
-            // iOS needs this in the same call stack as the gesture
-            try {
-                // Create a short, audible tone to force iOS to unlock
-                const osc = audioContext.createOscillator();
-                const gain = audioContext.createGain();
-                osc.connect(gain);
-                gain.connect(audioContext.destination);
-
-                // Use audible frequency - iOS ignores inaudible ones
-                osc.type = 'sine';
-                osc.frequency.value = 440;
-
-                // Very brief, quiet beep
-                const now = audioContext.currentTime;
-                gain.gain.setValueAtTime(0.001, now);
-                gain.gain.linearRampToValueAtTime(0.05, now + 0.01);
-                gain.gain.linearRampToValueAtTime(0.001, now + 0.05);
-
-                osc.start(now);
-                osc.stop(now + 0.1);
-
-                console.log('iOS unlock tone played, context state:', audioContext.state);
-            } catch (e) {
-                console.error('iOS unlock tone failed:', e);
-            }
-
-            // Also handle the resume promise
-            resumePromise.then(() => {
-                audioUnlocked = true;
-                console.log('AudioContext resumed, state:', audioContext.state);
-            }).catch(e => {
-                console.error('Resume failed:', e);
-            });
-
-            // Mark as unlocked optimistically (the tone was played in user gesture)
-            audioUnlocked = true;
-        } else if (audioContext.state === 'suspended') {
-            // Already unlocked but suspended (e.g., tab was backgrounded)
+        if (audioContext.state === 'suspended') {
             audioContext.resume();
+        }
+
+        if (!audioUnlocked) {
+            unlockIOSAudio();
         }
 
         return true;
     }
 
-    // Start a silent oscillator to keep audio context alive on iOS
-    // This prevents iOS from suspending the context between tones
-    function startSilentOscillator() {
-        if (!audioContext || silentOscillator) return;
-
+    function unlockIOSAudio() {
+        if (!audioContext) return;
         try {
-            silentOscillator = audioContext.createOscillator();
-            const silentGain = audioContext.createGain();
-            silentGain.gain.value = 0; // Completely silent
-            silentOscillator.connect(silentGain);
-            silentGain.connect(audioContext.destination);
-            silentOscillator.start();
-            console.log('Silent oscillator started to keep audio context alive');
-        } catch (e) {
-            console.error('Failed to start silent oscillator:', e);
-        }
-    }
+            // Short, quiet beep to unlock
+            const osc = audioContext.createOscillator();
+            const gain = audioContext.createGain();
+            osc.connect(gain);
+            gain.connect(audioContext.destination);
+            osc.frequency.value = 440;
+            gain.gain.setValueAtTime(0.001, audioContext.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.01);
+            osc.start(audioContext.currentTime);
+            osc.stop(audioContext.currentTime + 0.01);
 
-    // Stop the silent oscillator
-    function stopSilentOscillator() {
-        if (silentOscillator) {
-            try {
-                silentOscillator.stop();
-            } catch (e) {
-                // Ignore - might already be stopped
-            }
-            silentOscillator = null;
+            audioUnlocked = true;
+            console.log('iOS audio unlocked');
+            startSilentBuffer();
+        } catch (e) {
+            console.error('Unlock failed:', e);
         }
     }
 
     // ========== WAKE LOCK IMPLEMENTATION ==========
-    // Prevents screen from auto-locking during breathing sessions
-
-    // Request wake lock using modern API
     async function requestWakeLock() {
-        // Try Screen Wake Lock API first (iOS 16.4+, modern browsers)
+        // Try Screen Wake Lock API first (iOS 16.4+)
         if ('wakeLock' in navigator) {
             try {
                 wakeLock = await navigator.wakeLock.request('screen');
                 console.log('Wake Lock acquired via API');
 
-                // Re-acquire if released (e.g., tab switch)
                 wakeLock.addEventListener('release', () => {
                     console.log('Wake Lock released');
                     wakeLock = null;
-                    // Re-acquire if still running
-                    if (isRunning) {
+                    if (isRunning && document.visibilityState === 'visible') {
                         requestWakeLock();
                     }
                 });
@@ -187,26 +175,36 @@
             }
         }
 
-        // Fallback: NoSleep video trick for older iOS
-        // Playing a tiny video keeps the screen awake
+        // Fallback: NoSleep video for older iOS
         if (!noSleepVideo) {
             createNoSleepVideo();
         }
+
         if (noSleepVideo) {
             try {
-                // The video must be triggered from a user gesture
-                await noSleepVideo.play();
-                console.log('Wake Lock acquired via video fallback');
-                return true;
+                noSleepVideo.muted = true;
+                const playPromise = noSleepVideo.play();
+
+                if (playPromise !== undefined) {
+                    await playPromise;
+                    console.log('Wake Lock acquired via video fallback');
+                    return true;
+                }
             } catch (e) {
                 console.log('Video wake lock failed:', e.message);
+                try {
+                    noSleepVideo.muted = true;
+                    await noSleepVideo.play();
+                    return true;
+                } catch (e2) {
+                    console.log('Second attempt failed:', e2.message);
+                }
             }
         }
 
         return false;
     }
 
-    // Release wake lock
     function releaseWakeLock() {
         if (wakeLock) {
             wakeLock.release();
@@ -219,8 +217,6 @@
         }
     }
 
-    // Create a tiny looping video for the NoSleep fallback
-    // This uses a data URI of a minimal webm video
     function createNoSleepVideo() {
         try {
             noSleepVideo = document.createElement('video');
@@ -228,13 +224,13 @@
             noSleepVideo.setAttribute('muted', '');
             noSleepVideo.muted = true;
             noSleepVideo.loop = true;
+            noSleepVideo.autoplay = false;
 
-            // Minimal webm video (base64 encoded)
-            // This is a tiny 1x1 pixel, 1 frame webm that loops
-            const webmBase64 = 'GkXfowEAAAAAAAAfQoaBAUL3gQFC8oEEQvOBCEKChHdlYm1Ch4EEQoWBAhhTgGcBAAAAAAAVkhFNm3RALE27i1OrhBVJqWZTrIHfTbuMU6uEFlSua1OsggEwTbuMU6uEHFO7a1OsggHL';
+            // Properly formatted minimal WebM video (1x1 pixel, valid base64)
+            const webmBase64 = 'GkXfo0AgQoaBAUL3gQFC8oEEQvOBCEKCChARWKuBslLh3DkljofL4YJAIAAAIAyAAAAA0q2fOzq2gQAAAAAADuH2Uzf4iBAAAABABjAAAAAAAABZAAjQOA0YBAABAAABgAAAQIDQAE6ADrHHj8MAA==';
 
             noSleepVideo.src = 'data:video/webm;base64,' + webmBase64;
-            noSleepVideo.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px;';
+            noSleepVideo.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
             document.body.appendChild(noSleepVideo);
             console.log('NoSleep video element created');
         } catch (e) {
@@ -243,66 +239,58 @@
         }
     }
 
-    // Re-acquire wake lock when page becomes visible again
     document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible' && isRunning) {
-            requestWakeLock();
-            // Also resume audio context if needed
-            if (audioContext && audioContext.state === 'suspended') {
-                audioContext.resume();
+        if (document.visibilityState === 'visible') {
+            if (isRunning) {
+                requestWakeLock();
+                if (audioContext) {
+                    if (audioContext.state === 'suspended') {
+                        audioContext.resume().then(() => {
+                            if (soundEnabled && isRunning) startSilentBuffer();
+                        });
+                    } else if (soundEnabled && isRunning) {
+                        startSilentBuffer();
+                    }
+                }
             }
+        } else {
+            stopSilentBuffer();
         }
     });
-
     // ========== END WAKE LOCK ==========
 
-    // Stop any currently playing tone
     function stopCurrentTone() {
         if (currentTone) {
             try {
                 const { oscillator, gainNode } = currentTone;
-                const now = audioContext.currentTime;
-                // Quick fade out to avoid click
+                const now = audioContext ? audioContext.currentTime : 0;
                 gainNode.gain.cancelScheduledValues(now);
-                gainNode.gain.setValueAtTime(gainNode.gain.value, now);
-                gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
-                oscillator.stop(now + 0.15);
+                gainNode.gain.setValueAtTime(gainNode.gain.value || 0.0001, now);
+                gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.05);
+                oscillator.stop(now + 0.1);
             } catch (e) {
-                // Ignore - oscillator might already be stopped
+                // Ignore
             }
             currentTone = null;
         }
     }
 
-    // Play a sustained tone for a breathing phase
-    // durationMs: how long the phase lasts
-    // NOTE: This is called from the animation loop, not a user gesture,
-    // so we rely on the silent oscillator keeping the context alive
     function playSustainedTone(frequency, durationMs) {
-        if (!soundEnabled) {
-            return;
-        }
-        if (!audioContext) {
-            console.log('No audio context');
-            return;
-        }
+        if (!soundEnabled) return;
+        if (!audioContext) return;
 
-        // If context is suspended, try to resume (won't work without user gesture but worth trying)
         if (audioContext.state === 'suspended') {
-            audioContext.resume().catch(() => {});
-        }
-
-        // Don't wait for promise - play immediately if context is running
-        // The silent oscillator should keep the context alive
-        if (audioContext.state === 'running') {
+            audioContext.resume().then(() => {
+                actuallyPlaySustainedTone(frequency, durationMs);
+            }).catch(() => {
+                console.log('Could not resume audio context');
+            });
+        } else if (audioContext.state === 'running') {
             actuallyPlaySustainedTone(frequency, durationMs);
-        } else {
-            console.log('Audio context not running, state:', audioContext.state);
         }
     }
 
     function actuallyPlaySustainedTone(frequency, durationMs) {
-        // Stop any existing tone first
         stopCurrentTone();
 
         try {
@@ -312,27 +300,23 @@
             oscillator.connect(gainNode);
             gainNode.connect(audioContext.destination);
 
-            // Soft sine wave for meditative feel
             oscillator.type = 'sine';
             oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
 
             const now = audioContext.currentTime;
             const durationSec = durationMs / 1000;
-            const fadeInTime = Math.min(0.8, durationSec * 0.15);  // 15% of duration, max 0.8s
-            const fadeOutTime = Math.min(1.2, durationSec * 0.25); // 25% of duration, max 1.2s
-            const maxVolume = 0.35; // Comfortable sustained volume
+            const fadeInTime = Math.min(0.5, durationSec * 0.1);
+            const fadeOutTime = Math.min(1.0, durationSec * 0.2);
+            const maxVolume = 0.3;
 
-            // Envelope: fade in -> sustain -> fade out
-            gainNode.gain.setValueAtTime(0.001, now);
+            gainNode.gain.setValueAtTime(0.0001, now);
             gainNode.gain.exponentialRampToValueAtTime(maxVolume, now + fadeInTime);
-            // Hold at max volume until fade out begins
             gainNode.gain.setValueAtTime(maxVolume, now + durationSec - fadeOutTime);
-            gainNode.gain.exponentialRampToValueAtTime(0.001, now + durationSec);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, now + durationSec);
 
             oscillator.start(now);
-            oscillator.stop(now + durationSec + 0.1);
+            oscillator.stop(now + durationSec + 0.05);
 
-            // Track current tone for potential early stop
             currentTone = { oscillator, gainNode };
 
             oscillator.onended = () => {
@@ -341,13 +325,12 @@
                 }
             };
 
-            console.log('Sustained tone:', frequency, 'Hz for', durationSec.toFixed(1), 's');
+            console.log('Tone:', frequency, 'Hz for', durationSec, 's');
         } catch (e) {
-            console.error('Error playing sustained tone:', e);
+            console.error('Tone error:', e);
         }
     }
 
-    // Play a short tone (for test/feedback)
     function playShortTone(frequency) {
         if (!soundEnabled || !audioContext) return;
 
@@ -382,18 +365,16 @@
         }
     }
 
-    // Play completion chime (gentle arpeggio)
     function playCompletionChime() {
         if (!soundEnabled || !audioContext) return;
         stopCurrentTone();
 
-        const notes = [523.25, 659.25, 783.99]; // C5, E5, G5 - major chord
+        const notes = [523.25, 659.25, 783.99];
         notes.forEach((freq, i) => {
             setTimeout(() => playShortTone(freq), i * 250);
         });
     }
 
-    // Initialize
     function init() {
         loadState();
         setupEventListeners();
@@ -401,7 +382,6 @@
         updateSoundButton();
     }
 
-    // Load saved state from localStorage
     function loadState() {
         try {
             const savedExercise = localStorage.getItem('breathe-exercise');
@@ -425,7 +405,6 @@
         }
     }
 
-    // Save state to localStorage
     function saveState() {
         try {
             localStorage.setItem('breathe-exercise', currentExercise);
@@ -436,15 +415,12 @@
         }
     }
 
-    // Setup event listeners
     function setupEventListeners() {
-        // Start button - click for desktop
         startBtn.addEventListener('click', () => {
             initAudio();
             toggleSession();
         });
 
-        // Start button - touchend for iOS (more reliable for audio)
         startBtn.addEventListener('touchend', (e) => {
             e.preventDefault();
             initAudio();
@@ -476,49 +452,33 @@
             });
         });
 
-        // Sound button handler - shared logic
         function handleSoundToggle(e) {
             e.preventDefault();
             e.stopPropagation();
-
-            // MUST init audio in the touch/click handler for iOS
             initAudio();
 
             soundEnabled = !soundEnabled;
             updateSoundButton();
             saveState();
 
-            // Play test tone when enabling
             if (soundEnabled && audioContext) {
-                // Force resume and play
                 audioContext.resume().then(() => {
-                    // Start silent oscillator if session is running
-                    if (isRunning) {
-                        startSilentOscillator();
-                    }
-                    // Small delay to ensure iOS is ready
-                    setTimeout(() => {
-                        playShortTone(523.25);
-                    }, 50);
+                    if (isRunning) startSilentBuffer();
+                    setTimeout(() => playShortTone(523.25), 50);
                 });
             } else {
-                // Sound disabled - stop any playing tone and silent oscillator
                 stopCurrentTone();
-                stopSilentOscillator();
+                stopSilentBuffer();
             }
         }
 
-        // iOS: touchend is more reliable than click for audio
         soundBtn.addEventListener('touchend', handleSoundToggle, { passive: false });
 
-        // Desktop: use click
         soundBtn.addEventListener('click', (e) => {
-            // Avoid double-firing on touch devices
             if (e.pointerType === 'touch') return;
             handleSoundToggle(e);
         });
 
-        // Allow tapping the circle to start
         const breathingContainer = document.querySelector('.breathing-container');
 
         breathingContainer.addEventListener('click', (e) => {
@@ -528,7 +488,6 @@
             }
         });
 
-        // iOS: touchend on container to start (more reliable for audio)
         breathingContainer.addEventListener('touchend', (e) => {
             if (!e.target.closest('.controls')) {
                 e.preventDefault();
@@ -537,12 +496,8 @@
             }
         }, { passive: false });
 
-        // iOS: Unlock audio on first touch anywhere
-        // Must use touchend (not touchstart) for iOS audio unlock
-        const unlockAudioOnTouch = (e) => {
-            console.log('Touch detected, unlocking audio...');
+        const unlockAudioOnTouch = () => {
             initAudio();
-            // Remove after first successful unlock
             document.removeEventListener('touchstart', unlockAudioOnTouch);
             document.removeEventListener('touchend', unlockAudioOnTouch);
         };
@@ -550,45 +505,37 @@
         document.addEventListener('touchstart', unlockAudioOnTouch, { passive: true });
         document.addEventListener('touchend', unlockAudioOnTouch, { passive: true });
 
-        // Mouse users
         document.addEventListener('mousedown', () => {
             initAudio();
         }, { once: true });
     }
 
-    // Update sound button state
     function updateSoundButton() {
         soundBtn.classList.toggle('active', soundEnabled);
     }
 
-    // Handle phase change - start sustained tone for the phase duration
     function onPhaseChange(phaseName, phaseDurationMs) {
         if (phaseName === lastPhaseName) return;
         lastPhaseName = phaseName;
 
-        // Start sustained tone for this phase
         const frequency = TONE_FREQUENCIES[phaseName];
         if (frequency && soundEnabled) {
-            console.log('Phase:', phaseName, '- sustained tone', frequency, 'Hz for', phaseDurationMs, 'ms');
             playSustainedTone(frequency, phaseDurationMs);
         }
     }
 
-    // Update exercise button states
     function updateExerciseButtons() {
         exerciseBtns.forEach(btn => {
             btn.classList.toggle('active', btn.dataset.exercise === currentExercise);
         });
     }
 
-    // Update timer button states
     function updateTimerButtons() {
         timerBtns.forEach(btn => {
             btn.classList.toggle('active', parseInt(btn.dataset.duration, 10) === sessionDuration);
         });
     }
 
-    // Toggle session start/pause
     function toggleSession() {
         if (isRunning) {
             pauseSession();
@@ -597,7 +544,6 @@
         }
     }
 
-    // Start breathing session
     function startSession() {
         isRunning = true;
         resetBtn.disabled = false;
@@ -605,22 +551,17 @@
         pauseIcon.classList.remove('hidden');
         lastPhaseName = null;
 
-        // Disable selection while running
         exerciseBtns.forEach(btn => btn.style.pointerEvents = 'none');
         timerBtns.forEach(btn => btn.style.pointerEvents = 'none');
 
-        // Request wake lock to prevent screen sleep (called from user gesture)
+        // CRITICAL: Request wake lock immediately in user gesture
         requestWakeLock();
 
-        // Start silent oscillator to keep audio context alive on iOS
-        if (soundEnabled && audioContext) {
-            startSilentOscillator();
-        }
+        if (soundEnabled) startSilentBuffer();
 
         const now = performance.now();
         phaseStartTime = now;
 
-        // Handle resume from pause
         if (pausedTimeRemaining !== null && sessionDuration > 0) {
             sessionStartTime = now - ((sessionDuration - pausedTimeRemaining) * 1000);
             pausedTimeRemaining = null;
@@ -631,20 +572,15 @@
         runAnimation();
     }
 
-    // Pause session
     function pauseSession() {
         isRunning = false;
         playIcon.classList.remove('hidden');
         pauseIcon.classList.add('hidden');
 
-        // Stop any playing tone and silent oscillator
         stopCurrentTone();
-        stopSilentOscillator();
-
-        // Release wake lock when paused
+        stopSilentBuffer();
         releaseWakeLock();
 
-        // Save remaining time for resume
         if (sessionDuration > 0 && sessionStartTime) {
             const elapsed = (performance.now() - sessionStartTime) / 1000;
             pausedTimeRemaining = Math.max(0, sessionDuration - elapsed);
@@ -659,7 +595,6 @@
         phaseTimer.textContent = '';
     }
 
-    // Reset session
     function resetSession() {
         isRunning = false;
         currentPhaseIndex = 0;
@@ -669,11 +604,8 @@
         pausedTimeRemaining = null;
         lastPhaseName = null;
 
-        // Stop any playing tone and silent oscillator
         stopCurrentTone();
-        stopSilentOscillator();
-
-        // Release wake lock
+        stopSilentBuffer();
         releaseWakeLock();
 
         if (animationFrameId) {
@@ -685,25 +617,19 @@
         pauseIcon.classList.add('hidden');
         resetBtn.disabled = true;
 
-        // Re-enable selection
         exerciseBtns.forEach(btn => btn.style.pointerEvents = '');
         timerBtns.forEach(btn => btn.style.pointerEvents = '');
 
-        // Reset circle to minimum scale
         circle.style.transform = `scale(${SCALE_MIN})`;
 
         updateUI();
     }
 
-    // Complete session
     function completeSession() {
         isRunning = false;
 
-        // Stop any playing tone first
         stopCurrentTone();
-        stopSilentOscillator();
-
-        // Release wake lock
+        stopSilentBuffer();
         releaseWakeLock();
 
         if (animationFrameId) {
@@ -718,11 +644,9 @@
         phaseTimer.textContent = '';
         timeRemainingEl.textContent = '0:00';
 
-        // Completion feedback (short delay to let tone fade)
         setTimeout(playCompletionChime, 150);
     }
 
-    // Main animation loop using requestAnimationFrame
     function runAnimation() {
         if (!isRunning) return;
 
@@ -732,21 +656,16 @@
         const elapsed = now - phaseStartTime;
         const progress = Math.min(elapsed / phase.duration, 1);
 
-        // Update circle scale using GPU-accelerated transform
         updateCircleScale(phase, progress);
 
-        // Update instruction and timer
         instruction.textContent = phase.name;
         const remaining = Math.ceil((phase.duration - elapsed) / 1000);
         phaseTimer.textContent = remaining > 0 ? `${remaining}s` : '';
 
-        // Trigger phase change feedback (with duration for sustained tone)
         onPhaseChange(phase.name, phase.duration);
 
-        // Update session time remaining
         updateTimeRemaining(now);
 
-        // Check if session time is up
         if (sessionDuration > 0) {
             const sessionElapsed = (now - sessionStartTime) / 1000;
             if (sessionElapsed >= sessionDuration) {
@@ -755,11 +674,9 @@
             }
         }
 
-        // Check if phase is complete
         if (progress >= 1) {
             currentPhaseIndex++;
 
-            // Check if cycle is complete
             if (currentPhaseIndex >= exercise.phases.length) {
                 currentPhaseIndex = 0;
                 cycleCount++;
@@ -767,13 +684,12 @@
             }
 
             phaseStartTime = now;
-            lastPhaseName = null; // Reset to trigger next phase feedback
+            lastPhaseName = null;
         }
 
         animationFrameId = requestAnimationFrame(runAnimation);
     }
 
-    // Update circle scale using GPU-accelerated transform
     function updateCircleScale(phase, progress) {
         const easedProgress = easeInOutSine(progress);
         let scale;
@@ -789,12 +705,10 @@
         circle.style.transform = `scale(${scale})`;
     }
 
-    // Smooth easing function
     function easeInOutSine(x) {
         return -(Math.cos(Math.PI * x) - 1) / 2;
     }
 
-    // Update time remaining display during animation
     function updateTimeRemaining(now) {
         if (sessionDuration === 0) {
             timeRemainingEl.textContent = '';
@@ -809,7 +723,6 @@
         timeRemainingEl.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
     }
 
-    // Update UI to initial state
     function updateUI() {
         instruction.textContent = 'Tap to begin';
         phaseTimer.textContent = '';
@@ -818,7 +731,6 @@
         updateTimeRemainingDisplay();
     }
 
-    // Update time remaining display for initial state
     function updateTimeRemainingDisplay() {
         if (sessionDuration === 0) {
             timeRemainingEl.textContent = '∞';
@@ -829,12 +741,10 @@
         }
     }
 
-    // Update cycle count display
     function updateCycleCount() {
         cycleCountEl.textContent = cycleCount === 1 ? '1 cycle' : `${cycleCount} cycles`;
     }
 
-    // Register service worker
     if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
             navigator.serviceWorker.register('./service-worker.js')
@@ -843,6 +753,5 @@
         });
     }
 
-    // Initialize app
     init();
 })();
