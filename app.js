@@ -34,7 +34,7 @@
     // Audio context (created on first user interaction)
     let audioContext = null;
     let audioUnlocked = false;
-    let activeOscillators = [];
+    let currentTone = null; // Track the currently playing sustained tone
 
     // State
     let currentExercise = 'relaxing';
@@ -64,6 +64,7 @@
     const soundBtn = document.getElementById('sound-btn');
 
     // Initialize audio context (must be called from user gesture)
+    // iOS is VERY strict - must create, resume, AND play in same synchronous gesture
     function initAudio() {
         if (!audioContext) {
             try {
@@ -71,76 +72,75 @@
                 console.log('AudioContext created, state:', audioContext.state);
             } catch (e) {
                 console.error('Failed to create AudioContext:', e);
-                return;
+                return false;
             }
         }
 
-        // iOS requires both resume AND playing a sound in the same user gesture
+        // Resume synchronously for iOS
         if (audioContext.state === 'suspended') {
-            audioContext.resume().then(() => {
-                console.log('AudioContext resumed, state:', audioContext.state);
-            }).catch(e => {
-                console.error('Failed to resume AudioContext:', e);
-            });
+            audioContext.resume();
         }
 
-        // Unlock audio on iOS by playing an actual audible blip
+        // iOS unlock: must play actual audio in same call stack as user gesture
         if (!audioUnlocked && audioContext) {
             try {
-                // Create a very short, quiet tone to unlock
-                const oscillator = audioContext.createOscillator();
-                const gainNode = audioContext.createGain();
-
-                oscillator.connect(gainNode);
-                gainNode.connect(audioContext.destination);
-
-                oscillator.type = 'sine';
-                oscillator.frequency.value = 440;
-
-                const now = audioContext.currentTime;
-                gainNode.gain.setValueAtTime(0.001, now);
-                gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.1);
-
-                oscillator.start(now);
-                oscillator.stop(now + 0.1);
-
+                // Play a real (but very quiet) tone to unlock iOS audio
+                const osc = audioContext.createOscillator();
+                const gain = audioContext.createGain();
+                osc.connect(gain);
+                gain.connect(audioContext.destination);
+                osc.frequency.value = 1; // Very low frequency (inaudible)
+                gain.gain.value = 0.001; // Very quiet
+                osc.start(0);
+                osc.stop(audioContext.currentTime + 0.5);
                 audioUnlocked = true;
-                console.log('Audio unlocked successfully');
+                console.log('Audio unlocked for iOS');
             } catch (e) {
-                console.error('Failed to unlock audio:', e);
+                console.error('iOS unlock failed:', e);
             }
+        }
+
+        return true;
+    }
+
+    // Stop any currently playing tone
+    function stopCurrentTone() {
+        if (currentTone) {
+            try {
+                const { oscillator, gainNode } = currentTone;
+                const now = audioContext.currentTime;
+                // Quick fade out to avoid click
+                gainNode.gain.cancelScheduledValues(now);
+                gainNode.gain.setValueAtTime(gainNode.gain.value, now);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+                oscillator.stop(now + 0.15);
+            } catch (e) {
+                // Ignore - oscillator might already be stopped
+            }
+            currentTone = null;
         }
     }
 
-    // Play a soft tone
-    function playTone(frequency) {
-        console.log('playTone called:', frequency, 'soundEnabled:', soundEnabled, 'audioContext:', !!audioContext);
+    // Play a sustained tone for a breathing phase
+    // durationMs: how long the phase lasts
+    function playSustainedTone(frequency, durationMs) {
+        if (!soundEnabled || !audioContext) return;
 
-        if (!soundEnabled) {
-            console.log('Sound not enabled, skipping');
-            return;
-        }
-
-        if (!audioContext) {
-            console.log('No audio context, trying to init');
-            initAudio();
-            if (!audioContext) return;
-        }
-
-        // Ensure audio context is running
+        // Ensure context is running
         if (audioContext.state === 'suspended') {
-            console.log('AudioContext suspended, resuming...');
             audioContext.resume().then(() => {
-                actuallyPlayTone(frequency);
+                actuallyPlaySustainedTone(frequency, durationMs);
             });
             return;
         }
 
-        actuallyPlayTone(frequency);
+        actuallyPlaySustainedTone(frequency, durationMs);
     }
 
-    // Actually play the tone (called after context is ready)
-    function actuallyPlayTone(frequency) {
+    function actuallyPlaySustainedTone(frequency, durationMs) {
+        // Stop any existing tone first
+        stopCurrentTone();
+
         try {
             const oscillator = audioContext.createOscillator();
             const gainNode = audioContext.createGain();
@@ -148,45 +148,84 @@
             oscillator.connect(gainNode);
             gainNode.connect(audioContext.destination);
 
-            // Soft sine wave
+            // Soft sine wave for meditative feel
             oscillator.type = 'sine';
             oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
 
-            // Gentle envelope - soft attack, sustain, soft release
             const now = audioContext.currentTime;
-            const attackTime = 0.08;
-            const sustainTime = 0.25;
-            const releaseTime = 0.3;
-            const maxVolume = 0.5; // Increased volume for audibility
+            const durationSec = durationMs / 1000;
+            const fadeInTime = Math.min(0.8, durationSec * 0.15);  // 15% of duration, max 0.8s
+            const fadeOutTime = Math.min(1.2, durationSec * 0.25); // 25% of duration, max 1.2s
+            const maxVolume = 0.35; // Comfortable sustained volume
 
-            gainNode.gain.setValueAtTime(0, now);
-            gainNode.gain.linearRampToValueAtTime(maxVolume, now + attackTime);
-            gainNode.gain.setValueAtTime(maxVolume, now + attackTime + sustainTime);
-            gainNode.gain.exponentialRampToValueAtTime(0.001, now + attackTime + sustainTime + releaseTime);
+            // Envelope: fade in -> sustain -> fade out
+            gainNode.gain.setValueAtTime(0.001, now);
+            gainNode.gain.exponentialRampToValueAtTime(maxVolume, now + fadeInTime);
+            // Hold at max volume until fade out begins
+            gainNode.gain.setValueAtTime(maxVolume, now + durationSec - fadeOutTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, now + durationSec);
 
             oscillator.start(now);
-            oscillator.stop(now + attackTime + sustainTime + releaseTime + 0.05);
+            oscillator.stop(now + durationSec + 0.1);
 
-            // Track for cleanup
-            activeOscillators.push(oscillator);
+            // Track current tone for potential early stop
+            currentTone = { oscillator, gainNode };
+
             oscillator.onended = () => {
-                const idx = activeOscillators.indexOf(oscillator);
-                if (idx > -1) activeOscillators.splice(idx, 1);
+                if (currentTone && currentTone.oscillator === oscillator) {
+                    currentTone = null;
+                }
             };
 
-            console.log('Tone playing at', frequency, 'Hz');
+            console.log('Sustained tone:', frequency, 'Hz for', durationSec.toFixed(1), 's');
         } catch (e) {
-            console.error('Error playing tone:', e);
+            console.error('Error playing sustained tone:', e);
+        }
+    }
+
+    // Play a short tone (for test/feedback)
+    function playShortTone(frequency) {
+        if (!soundEnabled || !audioContext) return;
+
+        if (audioContext.state === 'suspended') {
+            audioContext.resume().then(() => actuallyPlayShortTone(frequency));
+            return;
+        }
+        actuallyPlayShortTone(frequency);
+    }
+
+    function actuallyPlayShortTone(frequency) {
+        try {
+            const osc = audioContext.createOscillator();
+            const gain = audioContext.createGain();
+            osc.connect(gain);
+            gain.connect(audioContext.destination);
+
+            osc.type = 'sine';
+            osc.frequency.value = frequency;
+
+            const now = audioContext.currentTime;
+            gain.gain.setValueAtTime(0.001, now);
+            gain.gain.exponentialRampToValueAtTime(0.4, now + 0.1);
+            gain.gain.setValueAtTime(0.4, now + 0.3);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+
+            osc.start(now);
+            osc.stop(now + 0.7);
+            console.log('Short tone:', frequency, 'Hz');
+        } catch (e) {
+            console.error('Error playing short tone:', e);
         }
     }
 
     // Play completion chime (gentle arpeggio)
     function playCompletionChime() {
-        if (!soundEnabled) return;
+        if (!soundEnabled || !audioContext) return;
+        stopCurrentTone();
 
         const notes = [523.25, 659.25, 783.99]; // C5, E5, G5 - major chord
         notes.forEach((freq, i) => {
-            setTimeout(() => playTone(freq), i * 200);
+            setTimeout(() => playShortTone(freq), i * 250);
         });
     }
 
@@ -264,31 +303,30 @@
             });
         });
 
-        // Sound button
+        // Sound button - iOS requires everything in the same touch handler
         soundBtn.addEventListener('click', (e) => {
-            e.stopPropagation(); // Prevent timer button behavior
+            e.stopPropagation();
 
-            // Init audio FIRST in the click handler (required for iOS)
+            // MUST init audio in the click handler for iOS
             initAudio();
 
             soundEnabled = !soundEnabled;
             updateSoundButton();
             saveState();
 
+            // Play test tone when enabling
             if (soundEnabled && audioContext) {
-                // Play test tone - wait a tiny bit for context to be ready
-                const playTest = () => {
-                    if (audioContext.state === 'running') {
-                        playTone(523.25); // C5 - same as breathe in
-                    } else {
-                        audioContext.resume().then(() => {
-                            playTone(523.25);
-                        });
-                    }
-                };
-
-                // Small delay to ensure audio is ready
-                setTimeout(playTest, 100);
+                // For iOS: ensure we're resumed, then play
+                if (audioContext.state !== 'running') {
+                    audioContext.resume().then(() => {
+                        playShortTone(523.25);
+                    });
+                } else {
+                    playShortTone(523.25);
+                }
+            } else {
+                // Sound disabled - stop any playing tone
+                stopCurrentTone();
             }
         });
 
@@ -299,6 +337,21 @@
                 toggleSession();
             }
         });
+
+        // iOS: Also listen for touchstart to unlock audio (more reliable than click)
+        document.addEventListener('touchstart', function unlockAudio() {
+            initAudio();
+            // Only need this once
+            document.removeEventListener('touchstart', unlockAudio);
+            console.log('Audio unlocked via touchstart');
+        }, { once: true });
+
+        // Also for mouse users
+        document.addEventListener('mousedown', function unlockAudioMouse() {
+            initAudio();
+            document.removeEventListener('mousedown', unlockAudioMouse);
+            console.log('Audio unlocked via mousedown');
+        }, { once: true });
     }
 
     // Update sound button state
@@ -306,16 +359,16 @@
         soundBtn.classList.toggle('active', soundEnabled);
     }
 
-    // Handle phase change - play tone
-    function onPhaseChange(phaseName) {
+    // Handle phase change - start sustained tone for the phase duration
+    function onPhaseChange(phaseName, phaseDurationMs) {
         if (phaseName === lastPhaseName) return;
         lastPhaseName = phaseName;
 
-        // Play tone for this phase
+        // Start sustained tone for this phase
         const frequency = TONE_FREQUENCIES[phaseName];
         if (frequency && soundEnabled) {
-            console.log('Phase changed to:', phaseName, '- playing', frequency, 'Hz');
-            playTone(frequency);
+            console.log('Phase:', phaseName, '- sustained tone', frequency, 'Hz for', phaseDurationMs, 'ms');
+            playSustainedTone(frequency, phaseDurationMs);
         }
     }
 
@@ -374,6 +427,9 @@
         playIcon.classList.remove('hidden');
         pauseIcon.classList.add('hidden');
 
+        // Stop any playing tone
+        stopCurrentTone();
+
         // Save remaining time for resume
         if (sessionDuration > 0 && sessionStartTime) {
             const elapsed = (performance.now() - sessionStartTime) / 1000;
@@ -399,6 +455,9 @@
         pausedTimeRemaining = null;
         lastPhaseName = null;
 
+        // Stop any playing tone
+        stopCurrentTone();
+
         if (animationFrameId) {
             cancelAnimationFrame(animationFrameId);
             animationFrameId = null;
@@ -422,6 +481,9 @@
     function completeSession() {
         isRunning = false;
 
+        // Stop any playing tone first
+        stopCurrentTone();
+
         if (animationFrameId) {
             cancelAnimationFrame(animationFrameId);
             animationFrameId = null;
@@ -434,8 +496,8 @@
         phaseTimer.textContent = '';
         timeRemainingEl.textContent = '0:00';
 
-        // Completion feedback
-        playCompletionChime();
+        // Completion feedback (short delay to let tone fade)
+        setTimeout(playCompletionChime, 150);
     }
 
     // Main animation loop using requestAnimationFrame
@@ -456,8 +518,8 @@
         const remaining = Math.ceil((phase.duration - elapsed) / 1000);
         phaseTimer.textContent = remaining > 0 ? `${remaining}s` : '';
 
-        // Trigger phase change feedback
-        onPhaseChange(phase.name);
+        // Trigger phase change feedback (with duration for sustained tone)
+        onPhaseChange(phase.name, phase.duration);
 
         // Update session time remaining
         updateTimeRemaining(now);
