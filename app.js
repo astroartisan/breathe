@@ -24,11 +24,29 @@
     const SCALE_MIN = 1;
     const SCALE_MAX = 2.5;
 
-    // Soft tone frequencies (Hz) - calming musical notes
-    const TONE_FREQUENCIES = {
-        'Breathe in': 523.25,   // C5 - bright, uplifting
-        'Hold': 392.00,         // G4 - stable, centered
-        'Breathe out': 329.63   // E4 - warm, releasing
+    // Phase tone profiles (Hz) - inhale rises, hold is flat, exhale damps
+    const TONE_PROFILES = {
+        'Breathe in': {
+            startHz: 329.63, // E4
+            endHz: 523.25,   // C5
+            gain: 0.38,
+            sweep: 'up',
+            damp: false
+        },
+        'Hold': {
+            startHz: 392.00, // G4
+            endHz: 392.00,
+            gain: 0.32,
+            sweep: 'flat',
+            damp: false
+        },
+        'Breathe out': {
+            startHz: 392.00, // G4
+            endHz: 261.63,   // C4
+            gain: 0.38,
+            sweep: 'down',
+            damp: true
+        }
     };
 
     // Audio context and nodes
@@ -54,7 +72,19 @@
     let sessionStartTime = null;
     let pausedTimeRemaining = null;
     let lastPhaseName = null;
-    let soundEnabled = false;
+    let soundEnabled = true;
+
+    // iOS double-tap / click guard
+    const TOUCH_IGNORE_DELAY_MS = 700;
+    let lastTouchTime = 0;
+
+    function markTouch() {
+        lastTouchTime = Date.now();
+    }
+
+    function shouldIgnoreClick() {
+        return Date.now() - lastTouchTime < TOUCH_IGNORE_DELAY_MS;
+    }
 
     // DOM elements
     const circle = document.querySelector('.breathing-circle');
@@ -239,10 +269,10 @@
             noSleepVideo.loop = true;
             noSleepVideo.autoplay = false;
 
-            // Valid minimal WebM (1x1 pixel, 1 second, silent)
-            const webmBase64 = 'GkXfo0AgQoaBAUL3gQFC8oEEQvOBCEKCChARWKuBslLh3DkljofL4YJAIAAAIAyAAAAA0q2fOzq2gQAAAAAADuH2Uzf4iBAAAABABjAAAAAAAABZAAjQOA0YBAABAAABgAAAQIDQAE6ADrHHj8MAA==';
+            // Valid minimal MP4 (2x2 pixel, 1 second, silent) for iOS compatibility
+            const mp4Base64 = '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';
 
-            noSleepVideo.src = 'data:video/webm;base64,' + webmBase64;
+            noSleepVideo.src = 'data:video/mp4;base64,' + mp4Base64;
             noSleepVideo.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;z-index:-1;';
             document.body.appendChild(noSleepVideo);
             console.log('NoSleep video created');
@@ -283,8 +313,8 @@
         }
     }
 
-    // Play sustained tone for the exact duration of the phase with smooth fade in/out
-    function playSustainedTone(frequency, durationMs, phaseName) {
+    // Play phase tone with frequency sweep + damping for the exact duration
+    function playPhaseTone(profile, durationMs, phaseName) {
         if (!soundEnabled || !audioContext) return;
 
         // Don't restart if already playing this exact phase
@@ -296,14 +326,14 @@
 
         if (audioContext.state === 'suspended') {
             audioContext.resume().then(() => {
-                actuallyPlaySustainedTone(frequency, durationMs, phaseName);
+                actuallyPlayPhaseTone(profile, durationMs, phaseName);
             });
         } else {
-            actuallyPlaySustainedTone(frequency, durationMs, phaseName);
+            actuallyPlayPhaseTone(profile, durationMs, phaseName);
         }
     }
 
-    function actuallyPlaySustainedTone(frequency, durationMs, phaseName) {
+    function actuallyPlayPhaseTone(profile, durationMs, phaseName) {
         try {
             const oscillator = audioContext.createOscillator();
             const gainNode = audioContext.createGain();
@@ -312,22 +342,34 @@
             gainNode.connect(audioContext.destination);
 
             oscillator.type = 'sine';
-            oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
+            oscillator.frequency.setValueAtTime(profile.startHz, audioContext.currentTime);
 
             const now = audioContext.currentTime;
             const durationSec = durationMs / 1000;
 
-            // Smooth envelope: 20% fade in, 60% sustain, 20% fade out
-            const fadeInTime = Math.min(1.0, durationSec * 0.2);
-            const fadeOutTime = Math.min(1.5, durationSec * 0.2);
-            const sustainLevel = 0.4; // Slightly louder for better presence
+            // Envelope: quick attack, long sustain, gentle release
+            const attackTime = Math.min(0.25, durationSec * 0.12);
+            const releaseTime = Math.min(0.6, durationSec * 0.18);
+            const sustainLevel = profile.gain;
 
-            // Schedule envelope
             gainNode.gain.setValueAtTime(0.0001, now);
-            gainNode.gain.exponentialRampToValueAtTime(sustainLevel, now + fadeInTime);
-            // Hold sustain until fade out
-            gainNode.gain.setValueAtTime(sustainLevel, now + durationSec - fadeOutTime);
-            gainNode.gain.exponentialRampToValueAtTime(0.0001, now + durationSec);
+            gainNode.gain.exponentialRampToValueAtTime(sustainLevel, now + attackTime);
+
+            if (profile.damp) {
+                // Exhale: gradually damp the tone
+                gainNode.gain.exponentialRampToValueAtTime(0.0001, now + durationSec);
+            } else {
+                // Hold or inhale: keep level, then release near the end
+                gainNode.gain.setValueAtTime(sustainLevel, now + durationSec - releaseTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.0001, now + durationSec);
+            }
+
+            if (profile.endHz !== profile.startHz) {
+                oscillator.frequency.exponentialRampToValueAtTime(
+                    profile.endHz,
+                    now + durationSec
+                );
+            }
 
             oscillator.start(now);
             oscillator.stop(now + durationSec + 0.1);
@@ -341,7 +383,7 @@
                 }
             };
 
-            console.log('Playing', phaseName, 'tone:', frequency, 'Hz for', durationSec, 'seconds');
+            console.log('Playing', phaseName, 'tone:', profile.startHz, 'Hz ->', profile.endHz, 'Hz for', durationSec, 'seconds');
         } catch (e) {
             console.error('Tone error:', e);
         }
@@ -438,8 +480,14 @@
             toggleSession();
         };
 
-        startBtn.addEventListener('click', handleStart);
-        startBtn.addEventListener('touchend', handleStart, { passive: false });
+        startBtn.addEventListener('click', (e) => {
+            if (shouldIgnoreClick()) return;
+            handleStart(e);
+        });
+        startBtn.addEventListener('touchend', (e) => {
+            markTouch();
+            handleStart(e);
+        }, { passive: false });
 
         resetBtn.addEventListener('click', resetSession);
 
@@ -488,9 +536,12 @@
             }
         }
 
-        soundBtn.addEventListener('touchend', handleSoundToggle, { passive: false });
+        soundBtn.addEventListener('touchend', (e) => {
+            markTouch();
+            handleSoundToggle(e);
+        }, { passive: false });
         soundBtn.addEventListener('click', (e) => {
-            if (e.pointerType === 'touch') return;
+            if (shouldIgnoreClick()) return;
             handleSoundToggle(e);
         });
 
@@ -504,8 +555,14 @@
             }
         };
 
-        breathingContainer.addEventListener('click', handleContainerTap);
-        breathingContainer.addEventListener('touchend', handleContainerTap, { passive: false });
+        breathingContainer.addEventListener('click', (e) => {
+            if (shouldIgnoreClick()) return;
+            handleContainerTap(e);
+        });
+        breathingContainer.addEventListener('touchend', (e) => {
+            markTouch();
+            handleContainerTap(e);
+        }, { passive: false });
 
         // Global unlock on first interaction
         const unlockOnce = () => {
@@ -527,10 +584,10 @@
         if (phaseName === lastPhaseName) return;
         lastPhaseName = phaseName;
 
-        const frequency = TONE_FREQUENCIES[phaseName];
-        if (frequency && soundEnabled) {
+        const profile = TONE_PROFILES[phaseName];
+        if (profile && soundEnabled) {
             // Play tone for the full duration of this phase
-            playSustainedTone(frequency, phaseDurationMs, phaseName);
+            playPhaseTone(profile, phaseDurationMs, phaseName);
         }
     }
 
