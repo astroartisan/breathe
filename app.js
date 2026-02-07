@@ -149,16 +149,33 @@
                 return false;
             }
         }
+        return true;
+    }
 
-        if (audioContext.state === 'suspended') {
-            audioContext.resume();
+    async function ensureAudioReady(playTestTone) {
+        if (!initAudio()) return false;
+
+        if (audioContext.state !== 'running') {
+            try {
+                await audioContext.resume();
+            } catch (e) {
+                console.error('Audio resume failed:', e);
+            }
         }
 
         if (!audioUnlocked) {
             unlockIOSAudio();
         }
 
-        return true;
+        if (soundEnabled) {
+            startSilentBuffer();
+        }
+
+        if (playTestTone && soundEnabled) {
+            playShortTone(523.25, true);
+        }
+
+        return audioContext.state === 'running';
     }
 
     function unlockIOSAudio() {
@@ -389,10 +406,10 @@
         }
     }
 
-    function playShortTone(frequency) {
+    function playShortTone(frequency, skipResume) {
         if (!soundEnabled || !audioContext) return;
 
-        if (audioContext.state === 'suspended') {
+        if (!skipResume && audioContext.state === 'suspended') {
             audioContext.resume().then(() => actuallyPlayShortTone(frequency));
             return;
         }
@@ -474,9 +491,9 @@
 
     function setupEventListeners() {
         // Start button handlers
-        const handleStart = (e) => {
+        const handleStart = async (e) => {
             if (e) e.preventDefault();
-            initAudio();
+            await ensureAudioReady(false);
             toggleSession();
         };
 
@@ -514,22 +531,17 @@
             });
         });
 
-        function handleSoundToggle(e) {
+        async function handleSoundToggle(e) {
             if (e) {
                 e.preventDefault();
                 e.stopPropagation();
             }
-            initAudio();
-
             soundEnabled = !soundEnabled;
             updateSoundButton();
             saveState();
 
-            if (soundEnabled && audioContext) {
-                audioContext.resume().then(() => {
-                    startSilentBuffer();
-                    setTimeout(() => playShortTone(523.25), 50);
-                });
+            if (soundEnabled) {
+                await ensureAudioReady(true);
             } else {
                 stopCurrentTone();
                 stopSilentBuffer();
@@ -547,10 +559,10 @@
 
         // Tap circle to start/pause
         const breathingContainer = document.querySelector('.breathing-container');
-        const handleContainerTap = (e) => {
+        const handleContainerTap = async (e) => {
             if (!e.target.closest('.controls')) {
                 if (e) e.preventDefault();
-                initAudio();
+                await ensureAudioReady(false);
                 toggleSession();
             }
         };
@@ -566,7 +578,7 @@
 
         // Global unlock on first interaction
         const unlockOnce = () => {
-            initAudio();
+            ensureAudioReady(false);
             document.removeEventListener('touchstart', unlockOnce);
             document.removeEventListener('touchend', unlockOnce);
             document.removeEventListener('click', unlockOnce);
