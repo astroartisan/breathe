@@ -61,6 +61,10 @@
     let noSleepVideo = null;
     let wakeLockInterval = null; // Keep-alive interval
 
+    // Background audio for iOS
+    let backgroundAudio = null;
+    let backgroundTimerId = null;
+
     // State
     let currentExercise = 'relaxing';
     let sessionDuration = 180;
@@ -139,6 +143,144 @@
         }
     }
 
+    // ========== BACKGROUND AUDIO (iOS) ==========
+    // iOS needs an <audio> element playing to keep the audio session alive
+    // in background / standalone PWA mode. Web Audio API alone is not enough.
+    function createBackgroundAudio() {
+        if (backgroundAudio) return;
+        try {
+            var sampleRate = 8000;
+            var numSamples = sampleRate; // 1 second loop
+            var bufferSize = 44 + numSamples * 2;
+            var buffer = new ArrayBuffer(bufferSize);
+            var view = new DataView(buffer);
+            var writeStr = function (offset, str) {
+                for (var i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+            };
+            writeStr(0, 'RIFF');
+            view.setUint32(4, 36 + numSamples * 2, true);
+            writeStr(8, 'WAVE');
+            writeStr(12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            writeStr(36, 'data');
+            view.setUint32(40, numSamples * 2, true);
+            // Write near-silent noise (prevents iOS from detecting silence and pausing)
+            for (var i = 0; i < numSamples; i++) {
+                view.setInt16(44 + i * 2, ((Math.random() - 0.5) * 4) | 0, true);
+            }
+
+            var blob = new Blob([buffer], { type: 'audio/wav' });
+            backgroundAudio = document.createElement('audio');
+            backgroundAudio.src = URL.createObjectURL(blob);
+            backgroundAudio.loop = true;
+            backgroundAudio.volume = 0.01;
+            backgroundAudio.setAttribute('playsinline', '');
+            backgroundAudio.style.display = 'none';
+            document.body.appendChild(backgroundAudio);
+            console.log('Background audio element created');
+        } catch (e) {
+            console.error('Background audio creation failed:', e);
+        }
+    }
+
+    function startBackgroundAudio() {
+        if (!backgroundAudio) createBackgroundAudio();
+        if (backgroundAudio && backgroundAudio.paused) {
+            backgroundAudio.play().catch(function (e) {
+                console.log('Background audio play failed:', e.message);
+            });
+        }
+    }
+
+    function stopBackgroundAudio() {
+        if (backgroundAudio && !backgroundAudio.paused) {
+            backgroundAudio.pause();
+        }
+    }
+
+    // Media Session API - shows controls on lock screen / control center
+    function setupMediaSession() {
+        if (!('mediaSession' in navigator)) return;
+
+        var exerciseName = EXERCISES[currentExercise] ? EXERCISES[currentExercise].name : 'Breathing';
+        navigator.mediaSession.metadata = new MediaMetadata({
+            title: exerciseName + ' Exercise',
+            artist: 'Breathe',
+            album: 'Breathing Exercise'
+        });
+
+        navigator.mediaSession.setActionHandler('play', function () {
+            if (!isRunning) startSession();
+        });
+        navigator.mediaSession.setActionHandler('pause', function () {
+            if (isRunning) pauseSession();
+        });
+    }
+
+    function updateMediaSessionState(state) {
+        if ('mediaSession' in navigator) {
+            navigator.mediaSession.playbackState = state;
+        }
+    }
+
+    // Background phase scheduling - uses setTimeout when rAF is unavailable (app backgrounded)
+    function scheduleBackgroundPhase() {
+        if (!isRunning) return;
+        clearBackgroundTimer();
+
+        var exercise = EXERCISES[currentExercise];
+        var phase = exercise.phases[currentPhaseIndex];
+        var now = performance.now();
+        var elapsed = now - phaseStartTime;
+        var remaining = Math.max(10, phase.duration - elapsed);
+
+        backgroundTimerId = setTimeout(function () {
+            backgroundTimerId = null;
+            if (!isRunning) return;
+
+            var currentTime = performance.now();
+
+            // Check session completion
+            if (sessionDuration > 0) {
+                var sessionElapsed = (currentTime - sessionStartTime) / 1000;
+                if (sessionElapsed >= sessionDuration) {
+                    completeSession();
+                    return;
+                }
+            }
+
+            // Advance to next phase
+            currentPhaseIndex++;
+            if (currentPhaseIndex >= exercise.phases.length) {
+                currentPhaseIndex = 0;
+                cycleCount++;
+            }
+            phaseStartTime = currentTime;
+            lastPhaseName = null;
+
+            // Play tone for the new phase
+            var nextPhase = exercise.phases[currentPhaseIndex];
+            onPhaseChange(nextPhase.name, nextPhase.duration);
+
+            // Schedule next phase transition
+            scheduleBackgroundPhase();
+        }, remaining);
+    }
+
+    function clearBackgroundTimer() {
+        if (backgroundTimerId) {
+            clearTimeout(backgroundTimerId);
+            backgroundTimerId = null;
+        }
+    }
+    // ========== END BACKGROUND AUDIO ==========
+
     // Initialize audio context (must be called from user gesture)
     function initAudio() {
         if (!audioContext) {
@@ -152,15 +294,17 @@
         return true;
     }
 
-    async function ensureAudioReady(playTestTone) {
+    // IMPORTANT: This must be synchronous to preserve iOS user-gesture context.
+    // Using async/await here breaks the gesture chain on iOS, preventing audio playback.
+    function ensureAudioReady(playTestTone) {
         if (!initAudio()) return false;
 
+        // Call resume() synchronously - don't await. iOS registers the intent
+        // from the user gesture; the promise resolving later is fine.
         if (audioContext.state !== 'running') {
-            try {
-                await audioContext.resume();
-            } catch (e) {
+            audioContext.resume().catch(function (e) {
                 console.error('Audio resume failed:', e);
-            }
+            });
         }
 
         if (!audioUnlocked) {
@@ -169,13 +313,14 @@
 
         if (soundEnabled) {
             startSilentBuffer();
+            startBackgroundAudio();
         }
 
         if (playTestTone && soundEnabled) {
             playShortTone(523.25, true);
         }
 
-        return audioContext.state === 'running';
+        return true;
     }
 
     function unlockIOSAudio() {
@@ -299,16 +444,33 @@
         }
     }
 
-    document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') {
-            // Re-acquire everything when app comes back to foreground
+    document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'hidden') {
+            // Going to background - switch from rAF to setTimeout scheduling
+            if (isRunning) {
+                if (animationFrameId) {
+                    cancelAnimationFrame(animationFrameId);
+                    animationFrameId = null;
+                }
+                scheduleBackgroundPhase();
+            }
+        } else if (document.visibilityState === 'visible') {
+            // Coming back to foreground - switch back to rAF
+            clearBackgroundTimer();
+
             if (isRunning || sessionStartTime) {
                 requestWakeLock();
                 if (audioContext && audioContext.state === 'suspended') {
-                    audioContext.resume().then(() => {
+                    audioContext.resume().then(function () {
                         startSilentBuffer();
                     });
                 }
+            }
+
+            if (isRunning) {
+                // Update cycle count display (may have changed in background)
+                updateCycleCount();
+                runAnimation();
             }
         }
     });
@@ -341,12 +503,20 @@
         stopCurrentTone();
         activePhaseName = phaseName;
 
+        // Always try to resume (no-op if already running)
         if (audioContext.state === 'suspended') {
-            audioContext.resume().then(() => {
-                actuallyPlayPhaseTone(profile, durationMs, phaseName);
-            });
-        } else {
+            audioContext.resume().catch(function () { });
+        }
+
+        // Try to play immediately; if context isn't ready, retry shortly
+        if (audioContext.state === 'running') {
             actuallyPlayPhaseTone(profile, durationMs, phaseName);
+        } else {
+            setTimeout(function () {
+                if (audioContext && audioContext.state === 'running' && activePhaseName === phaseName) {
+                    actuallyPlayPhaseTone(profile, durationMs, phaseName);
+                }
+            }, 150);
         }
     }
 
@@ -490,10 +660,10 @@
     }
 
     function setupEventListeners() {
-        // Start button handlers
-        const handleStart = async (e) => {
+        // Start button handlers - must be synchronous for iOS gesture chain
+        const handleStart = (e) => {
             if (e) e.preventDefault();
-            await ensureAudioReady(false);
+            ensureAudioReady(false);
             toggleSession();
         };
 
@@ -531,7 +701,7 @@
             });
         });
 
-        async function handleSoundToggle(e) {
+        function handleSoundToggle(e) {
             if (e) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -541,10 +711,11 @@
             saveState();
 
             if (soundEnabled) {
-                await ensureAudioReady(true);
+                ensureAudioReady(true);
             } else {
                 stopCurrentTone();
                 stopSilentBuffer();
+                stopBackgroundAudio();
             }
         }
 
@@ -559,10 +730,10 @@
 
         // Tap circle to start/pause
         const breathingContainer = document.querySelector('.breathing-container');
-        const handleContainerTap = async (e) => {
+        const handleContainerTap = (e) => {
             if (!e.target.closest('.controls')) {
                 if (e) e.preventDefault();
-                await ensureAudioReady(false);
+                ensureAudioReady(false);
                 toggleSession();
             }
         };
@@ -636,7 +807,14 @@
         // Keep screen on (works for running and paused states)
         requestWakeLock();
 
-        if (soundEnabled) startSilentBuffer();
+        if (soundEnabled) {
+            startSilentBuffer();
+            startBackgroundAudio();
+        }
+
+        // Set up lock screen controls
+        setupMediaSession();
+        updateMediaSessionState('playing');
 
         const now = performance.now();
         phaseStartTime = now;
@@ -653,12 +831,14 @@
 
     function pauseSession() {
         isRunning = false;
+        clearBackgroundTimer();
         playIcon.classList.remove('hidden');
         pauseIcon.classList.add('hidden');
 
-        // Stop sound but KEEP screen wake lock active!
+        // Stop sound but KEEP screen wake lock and background audio active!
         stopCurrentTone();
-        // Don't stop silent buffer - keep audio context warm
+        // Don't stop silent buffer or background audio - keep audio session warm
+        updateMediaSessionState('paused');
 
         // NOTE: We do NOT release wake lock here, so screen stays on while paused
         // This allows user to resume without unlocking phone
@@ -687,8 +867,11 @@
         lastPhaseName = null;
         activePhaseName = null;
 
+        clearBackgroundTimer();
         stopCurrentTone();
         stopSilentBuffer();
+        stopBackgroundAudio();
+        updateMediaSessionState('none');
 
         // Only release wake lock when fully reset
         releaseWakeLock();
@@ -713,10 +896,15 @@
     function completeSession() {
         isRunning = false;
 
+        clearBackgroundTimer();
         stopCurrentTone();
         stopSilentBuffer();
-        // Keep wake lock for a moment so user sees "Complete", then release
-        setTimeout(releaseWakeLock, 2000);
+        // Keep wake lock and background audio for a moment so user hears chime
+        setTimeout(function () {
+            releaseWakeLock();
+            stopBackgroundAudio();
+            updateMediaSessionState('none');
+        }, 2000);
 
         if (animationFrameId) {
             cancelAnimationFrame(animationFrameId);
