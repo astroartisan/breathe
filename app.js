@@ -104,6 +104,26 @@
     const timerBtns = document.querySelectorAll('.timer-btn:not(.sound-btn)');
     const soundBtn = document.getElementById('sound-btn');
 
+    // Tab / view switching
+    const tabBtns = document.querySelectorAll('.tab-btn');
+    const views = document.querySelectorAll('.view');
+
+    // Counter view elements
+    const counterInput = document.querySelector('.counter-input');
+    const counterValue = document.querySelector('.counter-value');
+    const counterStatus = document.querySelector('.counter-status');
+    const counterStartBtn = document.querySelector('.counter-start-btn');
+    const counterResetBtn = document.querySelector('.counter-reset-btn');
+    const counterPlayIcon = document.querySelector('.counter-play-icon');
+    const counterPauseIcon = document.querySelector('.counter-pause-icon');
+
+    // Counter state
+    let counterRunning = false;
+    let counterEndTime = null;        // Date.now() ms when countdown hits zero
+    let counterRemainingMs = null;    // cached remaining when paused
+    let counterRafId = null;
+    let counterBgTimerId = null;
+
     // iOS specific: create silent buffer to keep audio context alive
     function createSilentBuffer() {
         if (!audioContext) return;
@@ -362,7 +382,7 @@
                         console.log('Wake Lock released by system');
                         wakeLock = null;
                         // Re-acquire if still in session (running or paused)
-                        if (sessionStartTime || isRunning) {
+                        if (screenLockNeeded()) {
                             requestWakeLock();
                         }
                     });
@@ -392,18 +412,26 @@
         // Set up keep-alive interval to ensure video stays playing
         // iOS sometimes pauses videos after a while
         wakeLockInterval = setInterval(() => {
-            if (noSleepVideo && noSleepVideo.paused && (isRunning || sessionStartTime)) {
+            if (noSleepVideo && noSleepVideo.paused && screenLockNeeded()) {
                 console.log('Video was paused, resuming...');
                 noSleepVideo.play().catch(() => { });
             }
             // Also re-check system wake lock
-            if ('wakeLock' in navigator && !wakeLock && (isRunning || sessionStartTime)) {
+            if ('wakeLock' in navigator && !wakeLock && screenLockNeeded()) {
                 requestWakeLock();
             }
         }, 5000); // Check every 5 seconds
     }
 
+    // True while any feature (breathing session or counter) needs the screen awake
+    function screenLockNeeded() {
+        return isRunning || !!sessionStartTime || counterRunning;
+    }
+
     function releaseWakeLock() {
+        // Another active feature may still need the screen on
+        if (screenLockNeeded()) return;
+
         // Clear keep-alive
         if (wakeLockInterval) {
             clearInterval(wakeLockInterval);
@@ -454,11 +482,20 @@
                 }
                 scheduleBackgroundPhase();
             }
+            // Counter: drop rAF, arm a single timer for the moment it hits zero
+            if (counterRunning) {
+                if (counterRafId) {
+                    cancelAnimationFrame(counterRafId);
+                    counterRafId = null;
+                }
+                scheduleCounterBackground();
+            }
         } else if (document.visibilityState === 'visible') {
             // Coming back to foreground - switch back to rAF
             clearBackgroundTimer();
+            clearCounterBackground();
 
-            if (isRunning || sessionStartTime) {
+            if (screenLockNeeded()) {
                 requestWakeLock();
                 if (audioContext && audioContext.state === 'suspended') {
                     audioContext.resume().then(function () {
@@ -471,6 +508,10 @@
                 // Update cycle count display (may have changed in background)
                 updateCycleCount();
                 runAnimation();
+            }
+
+            if (counterRunning) {
+                runCounter();
             }
         }
     });
@@ -624,6 +665,7 @@
         setupEventListeners();
         updateUI();
         updateSoundButton();
+        counterValue.textContent = getCounterStartSeconds();
     }
 
     function loadState() {
@@ -746,6 +788,46 @@
             markTouch();
             handleContainerTap(e);
         }, { passive: false });
+
+        // Tab switching between Breathe and Counter views
+        tabBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                // Audio must be unlocked from a user gesture for the counter chime to work
+                ensureAudioReady(false);
+                switchView(btn.dataset.view);
+            });
+        });
+
+        // Counter controls
+        const handleCounterStart = (e) => {
+            if (e) e.preventDefault();
+            ensureAudioReady(false);
+            toggleCounter();
+        };
+        counterStartBtn.addEventListener('click', (e) => {
+            if (shouldIgnoreClick()) return;
+            handleCounterStart(e);
+        });
+        counterStartBtn.addEventListener('touchend', (e) => {
+            markTouch();
+            handleCounterStart(e);
+        }, { passive: false });
+
+        counterResetBtn.addEventListener('click', resetCounter);
+
+        // Keep the big display in sync while the user edits the starting number
+        counterInput.addEventListener('input', () => {
+            if (!counterRunning && counterRemainingMs === null) {
+                const n = getCounterStartSeconds();
+                counterValue.textContent = n;
+            }
+        });
+        counterInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                counterInput.blur();
+                handleCounterStart(e);
+            }
+        });
 
         // Global unlock on first interaction
         const unlockOnce = () => {
@@ -1019,6 +1101,167 @@
     function updateCycleCount() {
         cycleCountEl.textContent = cycleCount === 1 ? '1 cycle' : `${cycleCount} cycles`;
     }
+
+    // ========== COUNTER ==========
+    function switchView(view) {
+        tabBtns.forEach(btn => btn.classList.toggle('active', btn.dataset.view === view));
+        views.forEach(v => v.classList.toggle('active', v.id === view + '-view'));
+    }
+
+    function getCounterStartSeconds() {
+        let n = parseInt(counterInput.value, 10);
+        if (isNaN(n) || n < 1) n = 0;
+        if (n > 86400) n = 86400; // cap at 24h
+        return n;
+    }
+
+    function toggleCounter() {
+        if (counterRunning) {
+            pauseCounter();
+        } else {
+            startCounter();
+        }
+    }
+
+    function startCounter() {
+        // Resume from a pause, or start fresh from the input value
+        let remainingMs;
+        if (counterRemainingMs !== null) {
+            remainingMs = counterRemainingMs;
+        } else {
+            const seconds = getCounterStartSeconds();
+            if (seconds <= 0) {
+                counterStatus.textContent = 'Enter a number above 0';
+                return;
+            }
+            remainingMs = seconds * 1000;
+        }
+
+        counterRunning = true;
+        counterRemainingMs = null;
+        counterEndTime = Date.now() + remainingMs;
+
+        counterValue.classList.remove('finished');
+        counterPlayIcon.classList.add('hidden');
+        counterPauseIcon.classList.remove('hidden');
+        counterResetBtn.disabled = false;
+        counterInput.disabled = true;
+        counterStatus.textContent = 'Counting…';
+
+        // Same background machinery as breathing: keep screen on + audio session warm
+        requestWakeLock();
+        if (soundEnabled) {
+            startSilentBuffer();
+            startBackgroundAudio();
+        }
+
+        runCounter();
+    }
+
+    function pauseCounter() {
+        counterRunning = false;
+        counterRemainingMs = Math.max(0, counterEndTime - Date.now());
+
+        if (counterRafId) {
+            cancelAnimationFrame(counterRafId);
+            counterRafId = null;
+        }
+        clearCounterBackground();
+
+        counterPlayIcon.classList.remove('hidden');
+        counterPauseIcon.classList.add('hidden');
+        counterStatus.textContent = 'Paused';
+        // Keep wake lock / background audio warm so resume is instant (mirrors Breathe)
+    }
+
+    function resetCounter() {
+        counterRunning = false;
+        counterEndTime = null;
+        counterRemainingMs = null;
+
+        if (counterRafId) {
+            cancelAnimationFrame(counterRafId);
+            counterRafId = null;
+        }
+        clearCounterBackground();
+
+        counterPlayIcon.classList.remove('hidden');
+        counterPauseIcon.classList.add('hidden');
+        counterResetBtn.disabled = true;
+        counterInput.disabled = false;
+        counterValue.classList.remove('finished');
+        counterValue.textContent = getCounterStartSeconds();
+        counterStatus.textContent = 'Ready';
+
+        releaseWakeLock();
+        if (!isRunning && !sessionStartTime) {
+            stopSilentBuffer();
+            stopBackgroundAudio();
+        }
+    }
+
+    function completeCounter() {
+        counterRunning = false;
+        counterEndTime = null;
+        counterRemainingMs = null;
+
+        if (counterRafId) {
+            cancelAnimationFrame(counterRafId);
+            counterRafId = null;
+        }
+        clearCounterBackground();
+
+        counterValue.textContent = '0';
+        counterValue.classList.add('finished');
+        counterPlayIcon.classList.remove('hidden');
+        counterPauseIcon.classList.add('hidden');
+        counterResetBtn.disabled = false;
+        counterInput.disabled = false;
+        counterStatus.textContent = 'Done';
+
+        playCompletionChime();
+
+        // Release shared resources shortly after, so the chime can finish
+        setTimeout(function () {
+            releaseWakeLock();
+            if (!isRunning && !sessionStartTime) {
+                stopBackgroundAudio();
+            }
+        }, 2000);
+    }
+
+    // Foreground updates via requestAnimationFrame
+    function runCounter() {
+        if (!counterRunning) return;
+
+        const remainingMs = counterEndTime - Date.now();
+        if (remainingMs <= 0) {
+            completeCounter();
+            return;
+        }
+
+        counterValue.textContent = Math.ceil(remainingMs / 1000);
+        counterRafId = requestAnimationFrame(runCounter);
+    }
+
+    // Background: rAF is throttled/stopped, so arm one timer for the zero moment
+    function scheduleCounterBackground() {
+        if (!counterRunning) return;
+        clearCounterBackground();
+        const remainingMs = Math.max(10, counterEndTime - Date.now());
+        counterBgTimerId = setTimeout(function () {
+            counterBgTimerId = null;
+            if (counterRunning) completeCounter();
+        }, remainingMs);
+    }
+
+    function clearCounterBackground() {
+        if (counterBgTimerId) {
+            clearTimeout(counterBgTimerId);
+            counterBgTimerId = null;
+        }
+    }
+    // ========== END COUNTER ==========
 
     if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
