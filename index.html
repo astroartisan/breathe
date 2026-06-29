@@ -26,9 +26,13 @@
                 </svg>
             </div>
             <h1 class="title">Breathe</h1>
+            <nav class="tabs">
+                <button class="tab-btn active" data-view="breathe">Breathe</button>
+                <button class="tab-btn" data-view="counter">Counter</button>
+            </nav>
         </header>
 
-        <main class="main">
+        <main class="main view active" id="breathe-view">
             <div class="exercise-selector">
                 <button class="exercise-btn active" data-exercise="relaxing">
                     <span class="exercise-name">Relaxing</span>
@@ -86,6 +90,41 @@
             <div class="session-info">
                 <span class="cycle-count">0 cycles</span>
                 <span class="time-remaining"></span>
+            </div>
+        </main>
+
+        <main class="main view" id="counter-view">
+            <div class="counter-setup">
+                <label class="counter-label" for="counter-input">Count down from</label>
+                <input class="counter-input" id="counter-input" type="number" inputmode="numeric"
+                    min="1" max="86400" value="60" placeholder="0">
+            </div>
+
+            <div class="counter-display-wrapper">
+                <span class="counter-value">60</span>
+            </div>
+
+            <div class="controls">
+                <button class="control-btn start-btn counter-start-btn">
+                    <svg class="counter-play-icon" width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M6 4L16 10L6 16V4Z" fill="currentColor"/>
+                    </svg>
+                    <svg class="counter-pause-icon hidden" width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <rect x="5" y="4" width="3" height="12" fill="currentColor"/>
+                        <rect x="12" y="4" width="3" height="12" fill="currentColor"/>
+                    </svg>
+                </button>
+                <button class="control-btn counter-reset-btn" disabled>
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M4 10C4 6.68629 6.68629 4 10 4C12.2208 4 14.1599 5.21171 15.1973 7M16 10C16 13.3137 13.3137 16 10 16C7.77915 16 5.84009 14.7883 4.80269 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        <path d="M15 4V7H12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M5 16V13H8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
+            </div>
+
+            <div class="session-info">
+                <span class="counter-status">Ready</span>
             </div>
         </main>
     </div>
