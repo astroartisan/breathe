@@ -77,6 +77,7 @@
     let pausedTimeRemaining = null;
     let lastPhaseName = null;
     let soundEnabled = true;
+    let sessionComplete = false;
 
     // iOS double-tap / click guard
     const TOUCH_IGNORE_DELAY_MS = 700;
@@ -98,6 +99,7 @@
     const resetBtn = document.querySelector('.reset-btn');
     const playIcon = document.querySelector('.play-icon');
     const pauseIcon = document.querySelector('.pause-icon');
+    const redoIcon = document.querySelector('.redo-icon');
     const cycleCountEl = document.querySelector('.cycle-count');
     const timeRemainingEl = document.querySelector('.time-remaining');
     const exerciseBtns = document.querySelectorAll('.exercise-btn');
@@ -236,7 +238,8 @@
         });
 
         navigator.mediaSession.setActionHandler('play', function () {
-            if (!isRunning) startSession();
+            if (sessionComplete) restartSession();
+            else if (!isRunning) startSession();
         });
         navigator.mediaSession.setActionHandler('pause', function () {
             if (isRunning) pauseSession();
@@ -869,18 +872,38 @@
     }
 
     function toggleSession() {
-        if (isRunning) {
+        if (sessionComplete) {
+            // Session finished - the button now shows a redo icon; repeat it fresh
+            restartSession();
+        } else if (isRunning) {
             pauseSession();
         } else {
             startSession();
         }
     }
 
+    function restartSession() {
+        sessionComplete = false;
+        currentPhaseIndex = 0;
+        cycleCount = 0;
+        phaseStartTime = null;
+        sessionStartTime = null;
+        pausedTimeRemaining = null;
+        lastPhaseName = null;
+        activePhaseName = null;
+        redoIcon.classList.add('hidden');
+        updateCycleCount();
+        circle.style.transform = `scale(${SCALE_MIN})`;
+        startSession();
+    }
+
     function startSession() {
         isRunning = true;
+        sessionComplete = false;
         resetBtn.disabled = false;
         playIcon.classList.add('hidden');
         pauseIcon.classList.remove('hidden');
+        redoIcon.classList.add('hidden');
         lastPhaseName = null;
 
         exerciseBtns.forEach(btn => btn.style.pointerEvents = 'none');
@@ -941,6 +964,7 @@
 
     function resetSession() {
         isRunning = false;
+        sessionComplete = false;
         currentPhaseIndex = 0;
         cycleCount = 0;
         phaseStartTime = null;
@@ -965,6 +989,7 @@
 
         playIcon.classList.remove('hidden');
         pauseIcon.classList.add('hidden');
+        redoIcon.classList.add('hidden');
         resetBtn.disabled = true;
 
         exerciseBtns.forEach(btn => btn.style.pointerEvents = '');
@@ -977,6 +1002,7 @@
 
     function completeSession() {
         isRunning = false;
+        sessionComplete = true;
 
         clearBackgroundTimer();
         stopCurrentTone();
@@ -993,8 +1019,14 @@
             animationFrameId = null;
         }
 
-        playIcon.classList.remove('hidden');
+        // Swap the main button to a redo icon so it clearly repeats the session
+        playIcon.classList.add('hidden');
         pauseIcon.classList.add('hidden');
+        redoIcon.classList.remove('hidden');
+
+        // Re-enable selectors so a different exercise/duration can be picked before repeating
+        exerciseBtns.forEach(btn => btn.style.pointerEvents = '');
+        timerBtns.forEach(btn => btn.style.pointerEvents = '');
 
         instruction.textContent = 'Complete';
         phaseTimer.textContent = '';
