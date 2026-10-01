@@ -295,6 +295,10 @@ html, body {
     margin-top: 24px;
 }
 
+.breathing-container .session-info {
+    margin-top: 12px;
+}
+
 .cycle-count,
 .time-remaining {
     font-size: 13px;
